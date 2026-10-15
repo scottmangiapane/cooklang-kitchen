@@ -12,7 +12,11 @@ const prettyKey = k => String(k).replace(/[_-]+/g,' ').replace(/\b\w/g, c=>c.toU
 const human = v => Array.isArray(v) ? v.map(human).join(', ') : (v && typeof v === 'object' ? JSON.stringify(v) : String(v ?? ''));
 const icon = (name, cls='') => window.kitchenIcon ? window.kitchenIcon(name, cls) : '';
 function recipeUrl(id){ return '#/recipe/' + encodeURIComponent(id); }
-function photoUrl(id){ return '/api/photos/' + id.split('/').map(encodeURIComponent).join('/'); }
+function photoUrl(id, size='detail', version=''){
+  const query = new URLSearchParams({size});
+  if(version) query.set('v', version);
+  return '/api/photos/' + id.split('/').map(encodeURIComponent).join('/') + '?' + query.toString();
+}
 function tagMarkup(tags){ return (tags||[]).slice(0,6).map(t=>`<span class="tag">${icon('tag','tag-icon')}${esc(t)}</span>`).join(''); }
 function goHome(){ if(location.hash !== '#/') location.hash = '/'; else loadIndex(); }
 
@@ -40,8 +44,8 @@ function renderHome(query='', directoryOk=true){
     <div class="search-wrap">${icon('search','search-icon')}<input class="search" id="recipe-search" type="search" placeholder="Search recipes or tags…" value="${esc(query)}" autocomplete="off" aria-label="Search recipes"><span class="shortcut" title="Press / to focus search" aria-label="Keyboard shortcut: press slash to search">/</span></div>
     <div class="toolbar"><span class="results-label" id="results-count">${recipes.length} ${recipes.length===1?'recipe':'recipes'}${q?' found':''}</span><label class="sort-label">Sort by <select id="sort-order" class="sort-select" aria-label="Sort recipes"><option value="title" ${sort==='title'?'selected':''}>Name</option><option value="filename" ${sort==='filename'?'selected':''}>File name</option></select></label></div>
     ${recipes.length?`<div class="recipe-grid">${recipes.map((r,i)=>{
-      const photo = r.photo_available ? `<img class="card-photo" src="${esc(photoUrl(r.id))}" alt="" loading="lazy" onerror="this.remove();this.parentElement.classList.add('photo-missing')">` : '';
-      return `<a class="recipe-card ${r.photo_available?'has-photo':''}" href="${recipeUrl(r.id)}"><div class="card-top ${r.photo_available?'with-photo':''}">${r.photo_available?photo:`<span class="card-icon">${icon('bookOpen')}</span>`}<span class="card-number">${String(i+1).padStart(2,'0')}</span></div><h2 class="card-title">${esc(r.title)}</h2><div class="tag-row">${tagMarkup(r.tags)}</div><div class="card-footer"><span>${icon('utensils')} ${r.ingredient_count||0} ingredients</span><span>${icon('list')} ${r.step_count||0} steps</span></div></a>`;
+      const photo = r.photo_available ? `<img class="card-photo" src="${esc(photoUrl(r.id,'card',r.photo_version))}" alt="" loading="lazy" onerror="this.remove();this.parentElement.classList.add('photo-missing')">` : '';
+      return `<a class="recipe-card ${r.photo_available?'has-photo':''}" href="${recipeUrl(r.id)}"><div class="card-top ${r.photo_available?'with-photo':''}">${r.photo_available?photo:`<span class="card-icon">${icon('bookOpen')}</span>`}<span class="card-number">${String(i+1).padStart(2,'0')}</span></div><h2 class="card-title">${esc(r.title)}</h2><div class="tag-row">${tagMarkup(r.tags)}</div><div class="card-footer"><span>${icon('forkKnife')} ${r.ingredient_count||0} ingredients</span><span>${icon('list')} ${r.step_count||0} steps</span></div></a>`;
     }).join('')}</div>`:`<div class="empty"><strong>${recipeCache.length?'No matching recipes':'No recipes found'}</strong><span>${recipeCache.length?'Try another name or tag.':'Add .cook files to the mounted Recipes folder.'}</span></div>`}
   `;
   const input=document.getElementById('recipe-search');
@@ -210,13 +214,13 @@ function renderRecipe(r=currentRecipe, reset=false){
   }).join(''):'<p class="empty-list">No instruction steps were detected. The original file is available below.</p>';
   const notesMarkup=(r.notes||[]).length?`<aside class="notes-box"><h3>Cook’s notes</h3>${r.notes.map(n=>`<p>${inlineMarkup(n.parts)}</p>`).join('')}</aside>`:'';
   const tags=(r.tags||[]).length?`<div class="recipe-tags">${tagMarkup(r.tags)}</div>`:'';
-  const photo=r.photo_available?`<img class="recipe-photo" src="${esc(photoUrl(r.id))}" alt="${esc(r.title)}" onerror="this.remove();this.parentElement.classList.add('photo-missing')">`:'';
+  const photo=r.photo_available?`<img class="recipe-photo" src="${esc(photoUrl(r.id,'detail',r.photo_version))}" alt="${esc(r.title)}" onerror="this.remove();this.parentElement.classList.add('photo-missing')">`:'';
   const ingredientCount=r.ingredients?.length||0;
   app.innerHTML=`
     <a class="back-link" href="#/">${icon('arrowLeft')} All recipes</a>
     ${r.warning?`<div class="error-banner">${esc(r.warning)}</div>`:''}
-    <section class="recipe-header ${r.photo_available?'has-photo':''}"><div class="recipe-header-copy"><h1 class="recipe-title">${esc(r.title||'Untitled recipe')}</h1>${tags}<div class="recipe-deck">${metadataPills(meta)}<span class="meta-pill">${icon('utensils')} <b>${ingredientCount}</b> ingredients</span><span class="meta-pill">${icon('list')} <b>${r.steps?.length||0}</b> steps</span></div></div>${photo?`<div class="recipe-photo-frame">${photo}</div>`:''}${metadataCards(meta)}</section>
-    <div class="detail-layout"><aside class="ingredients-column"><section class="side-section"><div class="section-heading-row"><h2 class="section-heading">Ingredients <span>(${ingredientCount})</span></h2>${renderServingControl()}</div>${renderComponents(r.ingredients,'ingredient',factor)}</section><section class="side-section"><h2 class="section-heading">${icon('cookingPot')} Cookware</h2>${renderComponents(r.cookware,'cookware')}</section></aside><section class="instructions"><h2 class="section-heading instruction-heading">${icon('list')} Method</h2>${stepsMarkup}${notesMarkup}</section></div>
+    <section class="recipe-header ${r.photo_available?'has-photo':''}"><div class="recipe-header-copy"><h1 class="recipe-title">${esc(r.title||'Untitled recipe')}</h1>${tags}<div class="recipe-deck">${metadataPills(meta)}<span class="meta-pill">${icon('forkKnife')} <b>${ingredientCount}</b> ingredients</span><span class="meta-pill">${icon('list')} <b>${r.steps?.length||0}</b> steps</span></div></div>${photo?`<div class="recipe-photo-frame">${photo}</div>`:''}${metadataCards(meta)}</section>
+    <div class="detail-layout"><aside class="ingredients-column"><section class="side-section"><div class="serving-row">${renderServingControl()}</div><h2 class="section-heading">Ingredients <span>(${ingredientCount})</span></h2>${renderComponents(r.ingredients,'ingredient',factor)}</section><section class="side-section"><h2 class="section-heading">${icon('cookingPot')} Cookware</h2>${renderComponents(r.cookware,'cookware')}</section></aside><section class="instructions"><h2 class="section-heading instruction-heading">${icon('list')} Method</h2>${stepsMarkup}${notesMarkup}</section></div>
     <details class="raw-toggle"><summary>View original Cooklang source</summary><pre id="raw-source"></pre></details>`;
   document.getElementById('raw-source').textContent=r.source || `${r.title||'Untitled recipe'}\n${(r.steps||[]).map((s,i)=>`${i+1}. ${s.text}`).join('\n\n')}`;
   document.querySelectorAll('.ingredient-check').forEach(input=>input.addEventListener('change',e=>{

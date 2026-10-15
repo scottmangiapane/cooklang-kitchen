@@ -1,21 +1,33 @@
 #!/usr/bin/env python3
 """Small, read-only Cooklang recipe browser. Standard-library HTTP server."""
 from __future__ import annotations
+import hashlib
+import io
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 try:
     import yaml
 except ImportError:
     yaml = None
 
+try:
+    from PIL import Image, ImageOps
+except ImportError:
+    Image = ImageOps = None
+
 ROOT = Path(os.environ.get("RECIPES_DIR", "/recipes")).resolve()
 WEB = Path(__file__).parent / "static"
-PORT = int(os.environ.get("PORT", "8080"))
+IMAGE_CACHE_DIR = Path(os.environ.get("IMAGE_CACHE_DIR", "/image-cache")).resolve()
+# Intentionally fixed: change the host-side port mapping in compose.yaml instead.
+PORT = 8080
+IMAGE_CACHE_LOCK = threading.RLock()
+IMAGE_SIZES = {"card": (640, 440), "detail": (1440, 1200)}
 IMAGE_MIMES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".webp": "image/webp", ".avif": "image/avif", ".gif": "image/gif",
@@ -201,6 +213,85 @@ def recipe_photo_path(recipe_path, metadata=None):
     return None
 
 
+def photo_version(photo_path):
+    """A small source signature used in image URLs to refresh browser caches."""
+    if photo_path is None:
+        return ""
+    try:
+        stat = photo_path.stat()
+        relative = photo_path.relative_to(ROOT).as_posix()
+        path_signature = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:8]
+        return f"{path_signature}-{stat.st_mtime_ns:x}-{stat.st_size:x}"
+    except (OSError, ValueError):
+        return ""
+
+
+def optimized_photo(photo_path, variant):
+    """Return (image bytes, content type), using a persistent resized WebP cache.
+
+    Source files stay read-only. Cached variants are regenerated whenever the
+    source mtime or size changes. If Pillow or a decoder cannot handle the
+    image, the original is served as a compatibility fallback.
+    """
+    original_type = IMAGE_MIMES.get(photo_path.suffix.lower(), "application/octet-stream")
+    if Image is None or ImageOps is None:
+        return photo_path.read_bytes(), original_type
+
+    variant = variant if variant in IMAGE_SIZES else "detail"
+    try:
+        stat = photo_path.stat()
+        relative = photo_path.relative_to(ROOT).as_posix()
+        key = hashlib.sha256(f"{relative}::{variant}".encode("utf-8")).hexdigest()[:28]
+        output = IMAGE_CACHE_DIR / f"{key}.webp"
+        manifest = IMAGE_CACHE_DIR / f"{key}.json"
+        signature = {
+            "version": 1,
+            "source": relative,
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "variant": variant,
+        }
+
+        with IMAGE_CACHE_LOCK:
+            try:
+                cached_signature = json.loads(manifest.read_text(encoding="utf-8"))
+                if cached_signature == signature and output.is_file():
+                    return output.read_bytes(), "image/webp"
+            except (OSError, ValueError, TypeError):
+                pass
+
+            try:
+                IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                with Image.open(photo_path) as source:
+                    # Recipe photos are stills; use the first frame for animated formats.
+                    try:
+                        source.seek(0)
+                    except EOFError:
+                        pass
+                    image = ImageOps.exif_transpose(source)
+                    image.thumbnail(IMAGE_SIZES[variant], Image.Resampling.LANCZOS)
+                    has_alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
+                    image = image.convert("RGBA" if has_alpha else "RGB")
+                    buffer = io.BytesIO()
+                    image.save(buffer, format="WEBP", quality=80 if variant == "card" else 84,
+                               method=5, exact=True)
+                    webp_bytes = buffer.getvalue()
+
+                # Temporary files plus replace prevent partially-written cache entries.
+                tmp_image = output.with_suffix(".webp.tmp")
+                tmp_manifest = manifest.with_suffix(".json.tmp")
+                tmp_image.write_bytes(webp_bytes)
+                tmp_manifest.write_text(json.dumps(signature, separators=(",", ":")), encoding="utf-8")
+                os.replace(tmp_image, output)
+                os.replace(tmp_manifest, manifest)
+                return webp_bytes, "image/webp"
+            except Exception:
+                # Unsupported or corrupt image formats should not break recipe views.
+                return photo_path.read_bytes(), original_type
+    except OSError:
+        return photo_path.read_bytes(), original_type
+
+
 def normal_name(value):
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -279,10 +370,11 @@ def parse_recipe(path):
     elif not isinstance(tags, list):
         tags = [str(tags)] if tags else []
     tags = [normal_name(t) for t in tags if normal_name(t)]
+    photo = recipe_photo_path(path, meta)
     return {"id": relative, "title": title, "tags": tags, "metadata": meta,
             "ingredients": ingredients, "cookware": cookware, "timers": timers,
             "steps": steps, "notes": notes, "sections": sections, "warning": warning,
-            "photo_available": recipe_photo_path(path, meta) is not None,
+            "photo_available": photo is not None, "photo_version": photo_version(photo),
             "source_name": path.name, "source": source}
 
 
@@ -295,30 +387,32 @@ def list_recipes():
             recipe = parse_recipe(path)
             recipes.append({"id": recipe["id"], "title": recipe["title"], "tags": recipe["tags"],
                             "ingredient_count": len(recipe["ingredients"]), "step_count": len(recipe["steps"]),
-                            "photo_available": recipe["photo_available"]})
+                            "photo_available": recipe["photo_available"],
+                            "photo_version": recipe.get("photo_version", "")})
         except Exception as exc:
             # A single unreadable/malformed file should never prevent the rest of the library loading.
             recipes.append({"id": path.relative_to(ROOT).as_posix(),
                             "title": path.stem.replace("_", " ").replace("-", " "), "tags": [],
                             "ingredient_count": 0, "step_count": 0, "photo_available": False,
-                            "warning": f"Could not parse this file ({exc.__class__.__name__})."})
+                            "photo_version": "", "warning": f"Could not parse this file ({exc.__class__.__name__})."})
     return recipes
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "CooklangKitchen/1.0"
-    def send_bytes(self, data, content_type, status=200):
+    def send_bytes(self, data, content_type, status=200, cache_control="no-store"):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         self.end_headers()
         self.wfile.write(data)
     def send_json(self, value, status=200):
         self.send_bytes(json.dumps(value, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status)
     def do_GET(self):
-        path = unquote(urlparse(self.path).path)
+        parsed_url = urlparse(self.path)
+        path = unquote(parsed_url.path)
         if path == "/api/recipes":
             self.send_json({"recipes": list_recipes(), "directory_ok": ROOT.is_dir()})
             return
@@ -339,7 +433,13 @@ class Handler(BaseHTTPRequestHandler):
                 photo = recipe_photo_path(recipe_path, metadata)
                 if photo is None:
                     self.send_bytes(b"Photo not found", "text/plain; charset=utf-8", 404); return
-                self.send_bytes(photo.read_bytes(), IMAGE_MIMES[photo.suffix.lower()])
+                query = parse_qs(parsed_url.query)
+                variant = query.get("size", ["detail"])[0]
+                image_data, content_type = optimized_photo(photo, variant)
+                # Frontend URLs include the source signature, so immutable HTTP
+                # caching remains safe while host-side photo edits get new URLs.
+                self.send_bytes(image_data, content_type,
+                                cache_control="public, max-age=31536000, immutable")
             except Exception:
                 self.send_bytes(b"Photo not found", "text/plain; charset=utf-8", 404)
             return
@@ -366,7 +466,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"id": rid, "title": Path(label).stem, "tags": [], "metadata": {},
                                 "ingredients": [], "cookware": [], "timers": [], "steps": [], "notes": [],
                                 "sections": [], "warning": f"Could not parse this file ({exc.__class__.__name__}).",
-                                "photo_available": False, "source": body}, 200)
+                                "photo_available": False, "photo_version": "", "source": body}, 200)
             return
         if path in ("/", "/index.html"):
             try:
@@ -390,5 +490,5 @@ class Handler(BaseHTTPRequestHandler):
         print("%s - %s" % (self.address_string(), fmt % args), flush=True)
 
 if __name__ == "__main__":
-    print(f"Cooklang Kitchen serving {ROOT} on :{PORT}", flush=True)
+    print(f"Cooklang Kitchen serving {ROOT} on :{PORT}; image cache {IMAGE_CACHE_DIR}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

@@ -1,0 +1,16 @@
+# Copy this to compose.override.yaml for deployment-specific changes.
+# Docker Compose automatically merges compose.override.yaml with compose.yaml.
+services:
+  cooklang-kitchen:
+    # Host-only override example. Requires Docker Compose v2.24.4+ for !override.
+    ports: !override
+      - "127.0.0.1:3000:8080"
+
+    # To mount a different recipe directory and a writable custom cache directory:
+    # volumes:
+    #   - /srv/recipes:/recipes:ro
+    #   - /srv/cooklang-image-cache:/image-cache
+
+    # Optional user/group override (make the custom cache directory writable
+    # by this UID/GID if you use a host bind mount for /image-cache).
+    # user: "1000:1000"

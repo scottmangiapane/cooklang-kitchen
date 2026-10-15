@@ -7,7 +7,7 @@
   const paths = {
     search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>',
     bookOpen: '<path d="M12 7v14"/><path d="M3 18V5a2 2 0 0 1 2-2h3a4 4 0 0 1 4 4 4 4 0 0 1 4-4h3a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2h-3a4 4 0 0 0-4 2 4 4 0 0 0-4-2H5a2 2 0 0 1-2-2Z"/>',
-    utensils: '<path d="m3 2 7 7"/><path d="M13 2 10 5"/><path d="m9 6-6 6"/><path d="M12 15 22 5"/><path d="m15 12 7 7"/>',
+    forkKnife: '<path d="M3 2v7"/><path d="M7 2v7"/><path d="M11 2v7"/><path d="M3 9a4 4 0 0 0 8 0"/><path d="M7 13v9"/><path d="M21 15V2c-2 0-4 1.5-4 4v6c0 1.1.9 2 2 2h2Zm0 0v7"/>',
     list: '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
     chefHat: '<path d="M6 13.87A4 4 0 0 1 6.34 6h.33a6 6 0 0 1 11.98 0h.33A4 4 0 0 1 19 13.87V21H6Z"/><path d="M6 17h13"/>',
     cookingPot: '<path d="M2 12h20"/><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M10 12V5a2 2 0 0 1 4 0v7"/><path d="M7 5V3"/><path d="M17 5V3"/>',

@@ -1,3 +1,6 @@
 .git
 __pycache__
 *.pyc
+recipes/
+image-cache/
+compose.override.yaml
