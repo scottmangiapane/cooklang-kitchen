@@ -16,6 +16,10 @@ except ImportError:
 ROOT = Path(os.environ.get("RECIPES_DIR", "/recipes")).resolve()
 WEB = Path(__file__).parent / "static"
 PORT = int(os.environ.get("PORT", "8080"))
+IMAGE_MIMES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".webp": "image/webp", ".avif": "image/avif", ".gif": "image/gif",
+}
 
 
 def safe_metadata(value):
@@ -160,6 +164,43 @@ def inline_tokens(text):
     return parts
 
 
+def recipe_photo_path(recipe_path, metadata=None):
+    """Find an optional local photo without allowing paths outside the recipe root.
+
+    Preferred convention: a sibling image with the same stem as the .cook file.
+    A front-matter `photo:` or `image:` value can override that with a relative path.
+    Only common raster image formats are served.
+    """
+    metadata = metadata if isinstance(metadata, dict) else {}
+
+    def safe_image(candidate):
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(ROOT)
+        except (OSError, ValueError):
+            return None
+        if resolved.suffix.lower() not in IMAGE_MIMES or not resolved.is_file():
+            return None
+        return resolved
+
+    for key in ("photo", "image", "photo_file", "image_file"):
+        value = metadata.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        raw = Path(value.strip())
+        if raw.is_absolute():
+            continue
+        found = safe_image(recipe_path.parent / raw)
+        if found:
+            return found
+
+    for suffix in IMAGE_MIMES:
+        found = safe_image(recipe_path.with_suffix(suffix))
+        if found:
+            return found
+    return None
+
+
 def normal_name(value):
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -241,6 +282,7 @@ def parse_recipe(path):
     return {"id": relative, "title": title, "tags": tags, "metadata": meta,
             "ingredients": ingredients, "cookware": cookware, "timers": timers,
             "steps": steps, "notes": notes, "sections": sections, "warning": warning,
+            "photo_available": recipe_photo_path(path, meta) is not None,
             "source_name": path.name, "source": source}
 
 
@@ -252,12 +294,13 @@ def list_recipes():
         try:
             recipe = parse_recipe(path)
             recipes.append({"id": recipe["id"], "title": recipe["title"], "tags": recipe["tags"],
-                            "ingredient_count": len(recipe["ingredients"]), "step_count": len(recipe["steps"])})
+                            "ingredient_count": len(recipe["ingredients"]), "step_count": len(recipe["steps"]),
+                            "photo_available": recipe["photo_available"]})
         except Exception as exc:
             # A single unreadable/malformed file should never prevent the rest of the library loading.
             recipes.append({"id": path.relative_to(ROOT).as_posix(),
                             "title": path.stem.replace("_", " ").replace("-", " "), "tags": [],
-                            "ingredient_count": 0, "step_count": 0,
+                            "ingredient_count": 0, "step_count": 0, "photo_available": False,
                             "warning": f"Could not parse this file ({exc.__class__.__name__})."})
     return recipes
 
@@ -278,6 +321,27 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(urlparse(self.path).path)
         if path == "/api/recipes":
             self.send_json({"recipes": list_recipes(), "directory_ok": ROOT.is_dir()})
+            return
+        if path.startswith("/api/photos/"):
+            rid = path[len("/api/photos/"):]
+            if not rid or not rid.endswith(".cook") or "\x00" in rid:
+                self.send_bytes(b"Photo not found", "text/plain; charset=utf-8", 404); return
+            recipe_path = (ROOT / rid).resolve()
+            try:
+                recipe_path.relative_to(ROOT)
+            except ValueError:
+                self.send_bytes(b"Photo not found", "text/plain; charset=utf-8", 404); return
+            if not recipe_path.is_file() or recipe_path.suffix.lower() != ".cook":
+                self.send_bytes(b"Photo not found", "text/plain; charset=utf-8", 404); return
+            try:
+                source = recipe_path.read_text(encoding="utf-8", errors="replace")
+                metadata, _, _ = split_front_matter(source)
+                photo = recipe_photo_path(recipe_path, metadata)
+                if photo is None:
+                    self.send_bytes(b"Photo not found", "text/plain; charset=utf-8", 404); return
+                self.send_bytes(photo.read_bytes(), IMAGE_MIMES[photo.suffix.lower()])
+            except Exception:
+                self.send_bytes(b"Photo not found", "text/plain; charset=utf-8", 404)
             return
         if path.startswith("/api/recipes/"):
             rid = path[len("/api/recipes/"):]
@@ -302,7 +366,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"id": rid, "title": Path(label).stem, "tags": [], "metadata": {},
                                 "ingredients": [], "cookware": [], "timers": [], "steps": [], "notes": [],
                                 "sections": [], "warning": f"Could not parse this file ({exc.__class__.__name__}).",
-                                "source": body}, 200)
+                                "photo_available": False, "source": body}, 200)
             return
         if path in ("/", "/index.html"):
             try:
