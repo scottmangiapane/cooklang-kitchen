@@ -4,11 +4,10 @@
 
 <p align="center">A lightweight, self-hosted browser for Cooklang recipes.</p>
 
-<p align="center"><a href="https://github.com/scottmangiapane/cooklang-kitchen">Source code on GitHub</a></p>
-
 ## Screenshots
 
-<!-- Add screenshots here when ready. -->
+![demo](/screenshots/main-page.png)
+![demo](/screenshots/recipe-page.png)
 
 ## Run it
 
@@ -47,4 +46,3 @@ The parser reads Cooklang front matter and inline syntax, including ingredients 
 Photos are optional. Put an image beside a recipe with the same base name, or set `photo:`/`image:` to a relative path in front matter. JPG, PNG, WebP, AVIF, and GIF are supported. Pillow generates cached WebP thumbnails for recipe cards and detail pages; originals remain unchanged, and thumbnails are refreshed when source images change. GIF thumbnails use the first frame.
 
 On a recipe page, use the serving controls to scale ingredient quantities in the list and in each instruction step. Press `/` to focus search, or `Escape` to clear it.
-
