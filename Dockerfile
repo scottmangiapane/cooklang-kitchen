@@ -1,12 +1,19 @@
-FROM python:3.12-alpine
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 RECIPES_DIR=/recipes IMAGE_CACHE_DIR=/image-cache
+FROM node:22-alpine
+
+ENV RECIPES_DIR=/recipes \
+    IMAGE_CACHE_DIR=/image-cache \
+    RECIPE_CACHE_DIR=/recipe-cache
+
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    && mkdir -p /image-cache \
-    && chmod 0777 /image-cache
-COPY app.py .
+
+COPY package.json package-lock.json ./
+RUN npm install --omit=dev --no-audit --no-fund \
+    && mkdir -p /image-cache /recipe-cache \
+    && chown -R node:node /app /image-cache /recipe-cache
+
+COPY server.mjs parse_recipes.mjs ./
 COPY static ./static
+
 EXPOSE 8080
-USER nobody
-CMD ["python", "app.py"]
+USER node
+CMD ["node", "server.mjs"]

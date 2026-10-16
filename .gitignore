@@ -1,2 +1,5 @@
 # Local deployment overrides are intentionally not committed.
 /compose.override.yaml
+node_modules/
+recipe-cache/
+image-cache/

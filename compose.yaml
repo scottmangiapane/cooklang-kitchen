@@ -7,9 +7,12 @@ services:
     environment:
       RECIPES_DIR: /recipes
       IMAGE_CACHE_DIR: /image-cache
+      RECIPE_CACHE_DIR: /recipe-cache
     volumes:
       - ./recipes:/recipes:ro
       - image-cache:/image-cache
+      - recipe-cache:/recipe-cache
 
 volumes:
   image-cache:
+  recipe-cache:

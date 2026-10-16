@@ -17,7 +17,7 @@ function photoUrl(id, size='detail', version=''){
   if(version) query.set('v', version);
   return '/api/photos/' + id.split('/').map(encodeURIComponent).join('/') + '?' + query.toString();
 }
-function tagMarkup(tags){ return (tags||[]).slice(0,6).map(t=>`<span class="tag">${icon('tag','tag-icon')}${esc(t)}</span>`).join(''); }
+function tagMarkup(tags, limit=Infinity){ const all=tags||[]; const shown=all.slice(0,limit); const hidden=Math.max(0,all.length-shown.length); return shown.map(t=>`<span class="tag">${icon('tag','tag-icon')}${esc(t)}</span>`).join('')+(hidden?`<span class="tag tag-overflow" title="${hidden} more tags" aria-label="${hidden} more tags">+${hidden}</span>`:''); }
 function goHome(){ if(location.hash !== '#/') location.hash = '/'; else loadIndex(); }
 
 async function loadIndex(){
@@ -46,7 +46,7 @@ function renderHome(query='', directoryOk=true){
     <div class="toolbar"><span class="results-label" id="results-count">${recipes.length} ${recipes.length===1?'recipe':'recipes'}${q?' found':''}</span><label class="sort-label">Sort by <select id="sort-order" class="sort-select" aria-label="Sort recipes"><option value="title" ${sort==='title'?'selected':''}>Name</option><option value="filename" ${sort==='filename'?'selected':''}>File name</option></select></label></div>
     ${recipes.length?`<div class="recipe-grid">${recipes.map((r,i)=>{
       const photo = r.photo_available ? `<img class="card-photo" src="${esc(photoUrl(r.id,'card',r.photo_version))}" alt="" loading="lazy" decoding="async" onerror="this.remove();this.parentElement.classList.add('photo-missing')">` : '';
-      return `<a class="recipe-card ${r.photo_available?'has-photo':''}" href="${recipeUrl(r.id)}"><div class="card-top ${r.photo_available?'with-photo':''}">${r.photo_available?photo:`<span class="card-icon">${icon('bookOpen')}</span>`}<span class="card-number">${String(i+1).padStart(2,'0')}</span></div><h2 class="card-title">${esc(r.title)}</h2><div class="tag-row">${tagMarkup(r.tags)}</div><div class="card-footer"><span>${icon('forkKnife')} ${r.ingredient_count||0} ingredients</span><span>${icon('list')} ${r.step_count||0} steps</span></div></a>`;
+      return `<a class="recipe-card ${r.photo_available?'has-photo':''}" href="${recipeUrl(r.id)}"><div class="card-top ${r.photo_available?'with-photo':''}">${r.photo_available?photo:`<span class="card-icon">${icon('bookOpen')}</span>`}<span class="card-number">${String(i+1).padStart(2,'0')}</span></div><h2 class="card-title">${esc(r.title)}</h2><div class="tag-row">${tagMarkup(r.tags,6)}</div><div class="card-footer"><span>${icon('forkKnife')} ${r.ingredient_count||0} ingredients</span><span>${icon('list')} ${r.step_count||0} steps</span></div></a>`;
     }).join('')}</div>`:`<div class="empty"><strong>${recipeCache.length?'No matching recipes':'No recipes found'}</strong><span>${recipeCache.length?'Try another name or tag.':'Add .cook or .txt recipe files to the mounted Recipes folder.'}</span></div>`}
   `;
   const input=document.getElementById('recipe-search');
@@ -166,12 +166,9 @@ function renderComponents(items, type, factor=1){
   return `<ul class="cookware-list">${items.map(it=>`<li>${icon('cookingPot')}<span>${esc(it.name)}${it.optional?' <span class="optional">optional</span>':''}</span></li>`).join('')}</ul>`;
 }
 function stepIngredientMarkup(parts,factor){
-  const list=[];const seen=new Set();
-  for(const p of parts||[]){
-    if(p.type!=='ingredient')continue;
-    const key=[p.name,p.quantity,p.unit,p.preparation,p.optional].join('|').toLocaleLowerCase();
-    if(seen.has(key))continue;seen.add(key);list.push(p);
-  }
+  // Preserve every occurrence. The same ingredient can be used more than once
+  // in a single step, and each occurrence gets its own tag.
+  const list=(parts||[]).filter(p=>p.type==='ingredient');
   if(!list.length)return '';
   return `<div class="step-ingredients" aria-label="Ingredients used in this step">${list.map(p=>{
     const amount=scaledQuantity(p.quantity,p.unit,factor);

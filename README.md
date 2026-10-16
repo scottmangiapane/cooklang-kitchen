@@ -30,7 +30,7 @@ Keep machine-specific changes in `compose.override.yaml`; Docker Compose merges 
 cp compose.override.yaml.example compose.override.yaml
 ```
 
-The example publishes on <http://127.0.0.1:3000>. You can also change the recipe mount, image-cache mount, or container user in the override. The `!override` port syntax requires Docker Compose v2.24.4 or later.
+The example publishes on <http://127.0.0.1:3000>. You can also change the recipe mount, image-cache and recipe-cache mounts, or container user in the override. The `!override` port syntax requires Docker Compose v2.24.4 or later.
 
 Useful commands:
 
@@ -41,8 +41,8 @@ docker compose down
 
 ## Recipes and photos
 
-The parser reads Cooklang front matter and inline syntax, including ingredients and quantities, optional ingredients, preparation notes, cookware, timers, section headings, comments, and notes. A malformed file does not prevent other recipes from loading.
+The backend runs entirely on Node.js. Recipe syntax is parsed by the official [`@cooklang/cooklang`](https://www.npmjs.com/package/@cooklang/cooklang) package, which uses the Rust parser from [`cooklang-rs`](https://github.com/cooklang/cooklang-rs). YAML front matter is handled by `js-yaml`; parsed recipe data is cached on disk in the `recipe-cache` Docker volume and reused until a source file changes. Ordinary home-page loads scan recipe file metadata without reparsing unchanged recipes. A malformed recipe does not prevent other recipes from loading.
 
-Photos are optional. Put an image beside a recipe with the same base name, or set `photo:`/`image:` to a relative path in front matter. JPG, PNG, WebP, AVIF, and GIF are supported. Pillow generates cached WebP thumbnails for recipe cards and detail pages; originals remain unchanged, and thumbnails are refreshed when source images change. GIF thumbnails use the first frame.
+Cooklang front matter and the app's Markdown blockquote notes are handled around the official parser. Photos are optional: put an image beside a recipe with the same base name, or set `photo:`/`image:` to a relative path in front matter. JPG, PNG, WebP, AVIF, and GIF are supported. Sharp generates cached WebP thumbnails for recipe cards and detail pages in the `image-cache` Docker volume; originals remain unchanged, and thumbnails are refreshed when source images change. GIF thumbnails use the first frame. Parsed recipe data lives separately from image thumbnails, so the caches can be managed independently.
 
 On a recipe page, use the serving controls to scale ingredient quantities in the list and in each instruction step. Press `/` to focus search, or `Escape` to clear it.

@@ -316,6 +316,16 @@ body {
   gap: 5px;
 }
 
+.tag-overflow {
+  justify-content: center;
+  min-width: 24px;
+  padding-inline: 7px;
+  border: 1px dashed #b6bfb0;
+  background: transparent;
+  color: #596b55;
+  font-variant-numeric: tabular-nums;
+}
+
 .card-footer {
   width: 100%;
   margin-top: 15px;

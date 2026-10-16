@@ -1,0 +1,14 @@
+{
+  "name": "cooklang-kitchen",
+  "private": true,
+  "type": "module",
+  "description": "A lightweight, self-hosted browser for Cooklang recipes.",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@cooklang/cooklang": "0.19.1",
+    "js-yaml": "^5.5.0",
+    "sharp": "^0.35.5"
+  }
+}

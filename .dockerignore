@@ -1,6 +1,6 @@
 .git
-__pycache__
-*.pyc
 recipes/
 image-cache/
 compose.override.yaml
+node_modules/
+recipe-cache/

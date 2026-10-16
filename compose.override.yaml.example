@@ -10,7 +10,8 @@ services:
     # volumes:
     #   - /srv/recipes:/recipes:ro
     #   - /srv/cooklang-image-cache:/image-cache
+    #   - /srv/cooklang-recipe-cache:/recipe-cache
 
-    # Optional user/group override (make the custom cache directory writable
-    # by this UID/GID if you use a host bind mount for /image-cache).
+    # Optional user/group override (make both custom cache directories writable
+    # by this UID/GID if you use host bind mounts for /image-cache and /recipe-cache).
     # user: "1000:1000"
