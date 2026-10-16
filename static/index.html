@@ -5,18 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#f8f7f2">
-  <title>Kitchen — Recipe Library</title>
+  <meta name="description" content="A simple, self-hosted Cooklang recipe library.">
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <title>Cooklang Kitchen</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/icons.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#/" aria-label="Kitchen home"><span class="brand-mark">k.</span><span>kitchen<span class="brand-dot">.</span></span></a>
+    <a class="brand" href="#/" aria-label="Kitchen home"><img class="brand-mark" src="/static/logo.svg" alt=""><span><span class="brand-accent">Cooklang</span> Kitchen</span></a>
   </header>
   <main id="app" class="shell" aria-live="polite">
     <div class="loading"><span class="spinner"></span> Loading recipes…</div>
   </main>
-  <footer><span>Powered by <a href="https://cooklang.org/docs/spec/" target="_blank" rel="noreferrer">Cooklang</a></span><span>Icons by <a href="https://lucide.dev/" target="_blank" rel="noreferrer">Lucide</a></span></footer>
+  <footer><div class="footer-left"><a href="https://github.com/scottmangiapane/cooklang-kitchen" target="_blank" rel="noreferrer">Source code <span aria-hidden="true">↗</span></a></div><div class="footer-right"><span>Powered by <a href="https://cooklang.org/docs/spec/" target="_blank" rel="noreferrer">Cooklang</a></span><span>Icons by <a href="https://lucide.dev/" target="_blank" rel="noreferrer">Lucide</a></span></div></footer>
 </body>
 </html>

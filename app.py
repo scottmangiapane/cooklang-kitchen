@@ -27,7 +27,7 @@ IMAGE_CACHE_DIR = Path(os.environ.get("IMAGE_CACHE_DIR", "/image-cache")).resolv
 # Intentionally fixed: change the host-side port mapping in compose.yaml instead.
 PORT = 8080
 IMAGE_CACHE_LOCK = threading.RLock()
-IMAGE_SIZES = {"card": (640, 440), "detail": (1440, 1200)}
+IMAGE_SIZES = {"card": (800, 560), "detail": (1440, 1200)}
 IMAGE_MIMES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".webp": "image/webp", ".avif": "image/avif", ".gif": "image/gif",
@@ -179,8 +179,8 @@ def inline_tokens(text):
 def recipe_photo_path(recipe_path, metadata=None):
     """Find an optional local photo without allowing paths outside the recipe root.
 
-    Preferred convention: a sibling image with the same stem as the .cook file.
-    A front-matter `photo:` or `image:` value can override that with a relative path.
+    Preferred convention: a sibling image with the same logical basename as the
+    .cook, .txt, or .cook.txt recipe file. Front matter can override it with a relative path.
     Only common raster image formats are served.
     """
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -206,8 +206,11 @@ def recipe_photo_path(recipe_path, metadata=None):
         if found:
             return found
 
+    # Sidecar photos use the logical recipe basename: Recipe.cook/.txt/.cook.txt
+    # can all share Recipe.jpg, Recipe.webp, and so on.
+    base = recipe_base_name(recipe_path)
     for suffix in IMAGE_MIMES:
-        found = safe_image(recipe_path.with_suffix(suffix))
+        found = safe_image(recipe_path.with_name(base + suffix))
         if found:
             return found
     return None
@@ -245,7 +248,7 @@ def optimized_photo(photo_path, variant):
         output = IMAGE_CACHE_DIR / f"{key}.webp"
         manifest = IMAGE_CACHE_DIR / f"{key}.json"
         signature = {
-            "version": 1,
+            "version": 2,  # Invalidate older 640px / lower-quality card thumbnails.
             "source": relative,
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
@@ -273,7 +276,7 @@ def optimized_photo(photo_path, variant):
                     has_alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
                     image = image.convert("RGBA" if has_alpha else "RGB")
                     buffer = io.BytesIO()
-                    image.save(buffer, format="WEBP", quality=80 if variant == "card" else 84,
+                    image.save(buffer, format="WEBP", quality=86 if variant == "card" else 84,
                                method=5, exact=True)
                     webp_bytes = buffer.getvalue()
 
@@ -299,6 +302,28 @@ def normal_name(value):
 def display_quantity(token):
     bits = [token.get("quantity", ""), token.get("unit", "")]
     return " ".join(x for x in bits if x).strip()
+
+
+RECIPE_SUFFIXES = (".cook", ".txt")
+
+def is_recipe_file(path):
+    """Cooklang recipes may use .cook, .txt, or .cook.txt filenames."""
+    return path.is_file() and path.name.casefold().endswith(RECIPE_SUFFIXES)
+
+def recipe_base_name(path):
+    """Return the filename without the recognized recipe suffix."""
+    name = path.name
+    lower = name.casefold()
+    if lower.endswith(".cook.txt"):
+        return name[:-9]
+    if lower.endswith(".cook"):
+        return name[:-5]
+    if lower.endswith(".txt"):
+        return name[:-4]
+    return path.stem
+
+def recipe_display_name(path):
+    return re.sub(r"\s+", " ", recipe_base_name(path).replace("_", " ").replace("-", " ")).strip()
 
 
 def parse_recipe(path):
@@ -362,7 +387,7 @@ def parse_recipe(path):
                     "preparation": part.get("preparation", ""), "display_quantity": display_quantity(part)}
             target.append(item)
 
-    filename_title = path.stem.replace("_", " ").replace("-", " ").strip()
+    filename_title = recipe_display_name(path)
     title = normal_name(meta.get("title") or filename_title) or "Untitled recipe"
     tags = meta.get("tags", [])
     if isinstance(tags, str):
@@ -382,7 +407,8 @@ def list_recipes():
     recipes = []
     if not ROOT.exists() or not ROOT.is_dir():
         return recipes
-    for path in sorted(ROOT.rglob("*.cook"), key=lambda p: str(p.relative_to(ROOT)).casefold()):
+    for path in sorted((p for p in ROOT.rglob("*") if is_recipe_file(p)),
+                       key=lambda p: str(p.relative_to(ROOT)).casefold()):
         try:
             recipe = parse_recipe(path)
             recipes.append({"id": recipe["id"], "title": recipe["title"], "tags": recipe["tags"],
@@ -392,7 +418,7 @@ def list_recipes():
         except Exception as exc:
             # A single unreadable/malformed file should never prevent the rest of the library loading.
             recipes.append({"id": path.relative_to(ROOT).as_posix(),
-                            "title": path.stem.replace("_", " ").replace("-", " "), "tags": [],
+                            "title": recipe_display_name(path) or "Untitled recipe", "tags": [],
                             "ingredient_count": 0, "step_count": 0, "photo_available": False,
                             "photo_version": "", "warning": f"Could not parse this file ({exc.__class__.__name__})."})
     return recipes
@@ -400,12 +426,14 @@ def list_recipes():
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "CooklangKitchen/1.0"
-    def send_bytes(self, data, content_type, status=200, cache_control="no-store"):
+    def send_bytes(self, data, content_type, status=200, cache_control="no-store", extra_headers=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", cache_control)
+        for header, value in (extra_headers or {}).items():
+            self.send_header(header, value)
         self.end_headers()
         self.wfile.write(data)
     def send_json(self, value, status=200):
@@ -418,14 +446,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/photos/"):
             rid = path[len("/api/photos/"):]
-            if not rid or not rid.endswith(".cook") or "\x00" in rid:
+            if not rid or not rid.casefold().endswith(RECIPE_SUFFIXES) or "\x00" in rid:
                 self.send_bytes(b"Photo not found", "text/plain; charset=utf-8", 404); return
             recipe_path = (ROOT / rid).resolve()
             try:
                 recipe_path.relative_to(ROOT)
             except ValueError:
                 self.send_bytes(b"Photo not found", "text/plain; charset=utf-8", 404); return
-            if not recipe_path.is_file() or recipe_path.suffix.lower() != ".cook":
+            if not is_recipe_file(recipe_path):
                 self.send_bytes(b"Photo not found", "text/plain; charset=utf-8", 404); return
             try:
                 source = recipe_path.read_text(encoding="utf-8", errors="replace")
@@ -445,14 +473,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/recipes/"):
             rid = path[len("/api/recipes/"):]
-            if not rid or not rid.endswith(".cook") or "\x00" in rid:
+            if not rid or not rid.casefold().endswith(RECIPE_SUFFIXES) or "\x00" in rid:
                 self.send_json({"error": "Recipe not found."}, 404); return
             candidate = (ROOT / rid).resolve()
             try:
                 candidate.relative_to(ROOT)
             except ValueError:
                 self.send_json({"error": "Recipe not found."}, 404); return
-            if not candidate.is_file() or candidate.suffix.lower() != ".cook":
+            if not is_recipe_file(candidate):
                 self.send_json({"error": "Recipe not found."}, 404); return
             try:
                 self.send_json(parse_recipe(candidate))
@@ -463,7 +491,7 @@ class Handler(BaseHTTPRequestHandler):
                     body = candidate.read_text(encoding="utf-8", errors="replace")
                 except Exception:
                     body, label = "", candidate.name
-                self.send_json({"id": rid, "title": Path(label).stem, "tags": [], "metadata": {},
+                self.send_json({"id": rid, "title": recipe_display_name(Path(label)) or "Untitled recipe", "tags": [], "metadata": {},
                                 "ingredients": [], "cookware": [], "timers": [], "steps": [], "notes": [],
                                 "sections": [], "warning": f"Could not parse this file ({exc.__class__.__name__}).",
                                 "photo_available": False, "photo_version": "", "source": body}, 200)
@@ -483,8 +511,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(b"Not found", "text/plain", 404); return
             if not candidate.is_file():
                 self.send_bytes(b"Not found", "text/plain", 404); return
-            ctype = "text/css; charset=utf-8" if candidate.suffix == ".css" else "application/javascript; charset=utf-8"
-            self.send_bytes(candidate.read_bytes(), ctype); return
+            content_types = {
+                ".css": "text/css; charset=utf-8",
+                ".js": "application/javascript; charset=utf-8",
+                ".svg": "image/svg+xml",
+                ".png": "image/png",
+                ".txt": "text/plain; charset=utf-8",
+            }
+            ctype = content_types.get(candidate.suffix.lower(), "application/octet-stream")
+            cache = "no-cache" if candidate.name in {"app.js", "style.css", "icons.js"} else "public, max-age=3600"
+            self.send_bytes(candidate.read_bytes(), ctype, cache_control=cache); return
         self.send_bytes(b"Not found", "text/plain", 404)
     def log_message(self, fmt, *args):
         print("%s - %s" % (self.address_string(), fmt % args), flush=True)

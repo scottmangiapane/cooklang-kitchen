@@ -29,7 +29,8 @@ async function loadIndex(){
     recipeCache=data.recipes||[];
     renderHome('', data.directory_ok);
   }catch(e){
-    app.innerHTML=`<div class="error-banner">Couldn't load the recipe library. ${esc(e.message)}. Check that the recipe folder is mounted and the container is running.</div>`;
+    app.innerHTML=`<div class="error-banner">Couldn't load the recipe library (${esc(e.message)}).</div><button class="retry-button" id="retry-connection" type="button">Try again</button>`;
+    document.getElementById('retry-connection')?.addEventListener('click', loadIndex);
   }
 }
 
@@ -44,9 +45,9 @@ function renderHome(query='', directoryOk=true){
     <div class="search-wrap">${icon('search','search-icon')}<input class="search" id="recipe-search" type="search" placeholder="Search recipes or tags…" value="${esc(query)}" autocomplete="off" aria-label="Search recipes"><span class="shortcut" title="Press / to focus search" aria-label="Keyboard shortcut: press slash to search">/</span></div>
     <div class="toolbar"><span class="results-label" id="results-count">${recipes.length} ${recipes.length===1?'recipe':'recipes'}${q?' found':''}</span><label class="sort-label">Sort by <select id="sort-order" class="sort-select" aria-label="Sort recipes"><option value="title" ${sort==='title'?'selected':''}>Name</option><option value="filename" ${sort==='filename'?'selected':''}>File name</option></select></label></div>
     ${recipes.length?`<div class="recipe-grid">${recipes.map((r,i)=>{
-      const photo = r.photo_available ? `<img class="card-photo" src="${esc(photoUrl(r.id,'card',r.photo_version))}" alt="" loading="lazy" onerror="this.remove();this.parentElement.classList.add('photo-missing')">` : '';
+      const photo = r.photo_available ? `<img class="card-photo" src="${esc(photoUrl(r.id,'card',r.photo_version))}" alt="" loading="lazy" decoding="async" onerror="this.remove();this.parentElement.classList.add('photo-missing')">` : '';
       return `<a class="recipe-card ${r.photo_available?'has-photo':''}" href="${recipeUrl(r.id)}"><div class="card-top ${r.photo_available?'with-photo':''}">${r.photo_available?photo:`<span class="card-icon">${icon('bookOpen')}</span>`}<span class="card-number">${String(i+1).padStart(2,'0')}</span></div><h2 class="card-title">${esc(r.title)}</h2><div class="tag-row">${tagMarkup(r.tags)}</div><div class="card-footer"><span>${icon('forkKnife')} ${r.ingredient_count||0} ingredients</span><span>${icon('list')} ${r.step_count||0} steps</span></div></a>`;
-    }).join('')}</div>`:`<div class="empty"><strong>${recipeCache.length?'No matching recipes':'No recipes found'}</strong><span>${recipeCache.length?'Try another name or tag.':'Add .cook files to the mounted Recipes folder.'}</span></div>`}
+    }).join('')}</div>`:`<div class="empty"><strong>${recipeCache.length?'No matching recipes':'No recipes found'}</strong><span>${recipeCache.length?'Try another name or tag.':'Add .cook or .txt recipe files to the mounted Recipes folder.'}</span></div>`}
   `;
   const input=document.getElementById('recipe-search');
   input.addEventListener('input', e=>{
@@ -152,14 +153,9 @@ function scaledQuantity(quantity, unit, factor){
 }
 function itemQuantity(item,factor){return scaledQuantity(item.quantity,item.unit,factor);}
 
-function metadataPills(meta){
-  const candidates=[['author','By'],['prep_time','Prep'],['cook_time','Cook'],['total_time','Total']];
-  return candidates.filter(([key])=>meta&&meta[key]!==undefined&&meta[key]!==null&&human(meta[key]).trim())
-    .map(([key,label])=>`<span class="meta-pill">${esc(label)} <b>${esc(human(meta[key]))}</b></span>`).join('');
-}
 function metadataCards(meta){
   if(!meta||typeof meta!=='object')return '';
-  const hidden=new Set(['title','tags','author','servings','serves','portions','yield','prep_time','cook_time','total_time','photo','image','photo_file','image_file']);
+  const hidden=new Set(['title','tags','servings','serves','portions','yield','photo','image','photo_file','image_file']);
   const items=Object.entries(meta).filter(([k,v])=>!hidden.has(k.toLowerCase())&&v!==undefined&&v!==null&&human(v).trim());
   if(!items.length)return '';
   return `<div class="metadata-table">${items.map(([k,v])=>`<div class="metadata-item"><span class="metadata-key">${esc(prettyKey(k))}</span><div class="metadata-value">${esc(human(v))}</div></div>`).join('')}</div>`;
@@ -193,7 +189,10 @@ async function loadRecipe(id){
     const response=await fetch('/api/recipes/'+id.split('/').map(encodeURIComponent).join('/'),{cache:'no-store'});
     const data=await response.json(); if(!response.ok)throw new Error(data.error||'Recipe not found');
     renderRecipe(data,true);
-  }catch(e){app.innerHTML=`<a class="back-link" href="#/">${icon('arrowLeft')} All recipes</a><div class="error-banner">Couldn't open this recipe. ${esc(e.message)}</div>`;}
+  }catch(e){
+    app.innerHTML=`<div class="error-banner">Couldn't open this recipe. ${esc(e.message)}</div><button class="retry-button" id="retry-connection" type="button">Try again</button>`;
+    document.getElementById('retry-connection')?.addEventListener('click', () => loadRecipe(id));
+  }
 }
 function renderRecipe(r=currentRecipe, reset=false){
   if(r)currentRecipe=r;
@@ -217,9 +216,8 @@ function renderRecipe(r=currentRecipe, reset=false){
   const photo=r.photo_available?`<img class="recipe-photo" src="${esc(photoUrl(r.id,'detail',r.photo_version))}" alt="${esc(r.title)}" onerror="this.remove();this.parentElement.classList.add('photo-missing')">`:'';
   const ingredientCount=r.ingredients?.length||0;
   app.innerHTML=`
-    <a class="back-link" href="#/">${icon('arrowLeft')} All recipes</a>
     ${r.warning?`<div class="error-banner">${esc(r.warning)}</div>`:''}
-    <section class="recipe-header ${r.photo_available?'has-photo':''}"><div class="recipe-header-copy"><h1 class="recipe-title">${esc(r.title||'Untitled recipe')}</h1>${tags}<div class="recipe-deck">${metadataPills(meta)}<span class="meta-pill">${icon('forkKnife')} <b>${ingredientCount}</b> ingredients</span><span class="meta-pill">${icon('list')} <b>${r.steps?.length||0}</b> steps</span></div></div>${photo?`<div class="recipe-photo-frame">${photo}</div>`:''}${metadataCards(meta)}</section>
+    <section class="recipe-header ${r.photo_available?'has-photo':''}"><div class="recipe-header-copy"><h1 class="recipe-title">${esc(r.title||'Untitled recipe')}</h1>${tags}<div class="recipe-deck"><span class="meta-pill">${icon('forkKnife')} <b>${ingredientCount}</b> ingredients</span><span class="meta-pill">${icon('list')} <b>${r.steps?.length||0}</b> steps</span></div>${metadataCards(meta)}</div>${photo?`<div class="recipe-photo-frame">${photo}</div>`:''}</section>
     <div class="detail-layout"><aside class="ingredients-column"><section class="side-section"><div class="serving-row">${renderServingControl()}</div><h2 class="section-heading">Ingredients <span>(${ingredientCount})</span></h2>${renderComponents(r.ingredients,'ingredient',factor)}</section><section class="side-section"><h2 class="section-heading">${icon('cookingPot')} Cookware</h2>${renderComponents(r.cookware,'cookware')}</section></aside><section class="instructions"><h2 class="section-heading instruction-heading">${icon('list')} Method</h2>${stepsMarkup}${notesMarkup}</section></div>
     <details class="raw-toggle"><summary>View original Cooklang source</summary><pre id="raw-source"></pre></details>`;
   document.getElementById('raw-source').textContent=r.source || `${r.title||'Untitled recipe'}\n${(r.steps||[]).map((s,i)=>`${i+1}. ${s.text}`).join('\n\n')}`;
@@ -248,3 +246,4 @@ window.addEventListener('keydown',e=>{
   }
 });
 route();
+
