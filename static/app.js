@@ -9,7 +9,14 @@ let checkedIngredients = new Set();
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const prettyKey = k => String(k).replace(/[_-]+/g,' ').replace(/\b\w/g, c=>c.toUpperCase());
-const human = v => Array.isArray(v) ? v.map(human).join(', ') : (v && typeof v === 'object' ? JSON.stringify(v) : String(v ?? ''));
+const human = v => {
+  if (Array.isArray(v)) return v.map(human).filter(Boolean).join(', ');
+  if (v && typeof v === 'object') {
+    if ('name' in v || 'url' in v) return [v.name, v.url].filter(Boolean).join(' — ');
+    return JSON.stringify(v);
+  }
+  return String(v ?? '');
+};
 const icon = (name, cls='') => window.kitchenIcon ? window.kitchenIcon(name, cls) : '';
 function recipeUrl(id){ return '#/recipe/' + encodeURIComponent(id); }
 function photoUrl(id, size='detail', version=''){
@@ -58,173 +65,226 @@ function renderHome(query='', directoryOk=true){
   document.getElementById('sort-order').addEventListener('change',()=>renderHome(document.getElementById('recipe-search').value,directoryOk));
 }
 
-function inlineMarkup(parts){
-  return (parts||[]).map(p=>{
-    if(p.type==='text') return esc(p.text).replace(/\n/g,'<br>');
-    if(p.type==='ingredient') return `<span class="inline-ingredient" title="Ingredient${p.optional?' (optional)':''}">${esc(p.name)}${p.optional?' · optional':''}</span>${p.preparation?` <span class="inline-preparation">(${esc(p.preparation)})</span>`:''}`;
-    if(p.type==='cookware') return `<span class="inline-cookware" title="Cookware">${esc(p.name)}</span>${p.optional?' <span class="optional">optional</span>':''}`;
-    if(p.type==='timer') return `<span class="inline-timer">${icon('clock')} ${esc([p.name && p.name!=='Timer'?p.name:'',p.quantity,p.unit].filter(Boolean).join(' '))}</span>`;
-    return '';
-  }).join('');
+function recipeAst(recipe){return recipe.recipe;}
+function recipeMetadata(recipe){
+  if(recipe.display_metadata&&typeof recipe.display_metadata==='object')return recipe.display_metadata;
+  const rawMetadata=recipe.recipe?.raw_metadata;
+  const raw=rawMetadata?.map || rawMetadata || recipe.recipe?.metadata?.map || {};
+  const interpreted=recipe.metadata;
+  return {
+    ...raw,
+    ...interpreted.custom,
+    ...(interpreted.title!==undefined?{title:interpreted.title}:{}),
+    ...(interpreted.description!==undefined?{description:interpreted.description}:{}),
+    ...(interpreted.tags!==undefined?{tags:interpreted.tags}:{}),
+    ...(interpreted.servings!==undefined?{servings:interpreted.servings}:{}),
+  };
+}
+function recipeTags(meta){return (meta.tags||[]).map(tag=>tag.trim()).filter(Boolean);}
+function metadataCards(meta,photoAvailable=false){
+  const hidden=new Set(['title','tags','servings','serves','yield']);
+  if(photoAvailable)for(const key of ['image','images','picture','pictures'])hidden.add(key);
+  const items=Object.entries(meta).filter(([key,value])=>!hidden.has(key.toLowerCase().replace(/[_-]+/g,' '))&&value!==undefined&&value!==null&&human(value).trim());
+  if(!items.length)return '';
+  return `<div class="metadata-table">${items.map(([key,value])=>`<div class="metadata-item"><span class="metadata-key">${esc(prettyKey(key))}</span><div class="metadata-value">${esc(human(value))}</div></div>`).join('')}</div>`;
+}
+function astSections(ast){return ast.sections;}
+function contentItems(content){return content.value.items;}
+function quantityText(text){return String(text||'').replace(/\s*°?([FC])$/i,'°$1');}
+function mergeSidebarComponents(items,{includePreparation=false}={}){
+  const totals=new Map();
+  for(const item of items){
+    const amount=String(item.quantity||'').trim();
+    const match=amount.match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(.*?)$/);
+    const key=[item.name.toLocaleLowerCase(),item.optional,includePreparation?(item.preparation||'').toLocaleLowerCase():'',match?match[2].trim().toLocaleLowerCase():amount].join('\u0000');
+    const existing=totals.get(key);
+    if(existing&&match){
+      const previous=String(existing.quantity||'').match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(.*?)$/);
+      if(previous){
+        const sum=Number(previous[1])+Number(match[1]);
+        existing.quantity=`${Number(sum.toFixed(6))}${match[2]?' '+match[2].trim():''}`;
+        continue;
+      }
+    }
+    if(!existing)totals.set(key,{...item});
+    else totals.set(`${key}\u0000${item.index}`,{...item});
+  }
+  return [...totals.values()];
+}
+function sidebarIngredients(recipe){
+  const ast=recipeAst(recipe),display=recipe.display;
+  const items=display.groupedIngredients.map(({index,quantity})=>({
+    index,
+    name:display.ingredientNames[index],
+    optional:display.ingredientOptional[index],
+    preparation:ast.ingredients[index].note||'',
+    quantity,
+  }));
+  return mergeSidebarComponents(items,{includePreparation:true});
+}
+function sidebarCookware(recipe){
+  const display=recipe.display;
+  const items=display.groupedCookware.filter(({index})=>display.cookwareListed[index]).map(({index,quantity})=>({
+    index,
+    name:display.cookwareNames[index],
+    optional:display.cookwareOptional[index],
+    quantity,
+  }));
+  return mergeSidebarComponents(items);
+}
+function renderComponents(items,type){
+  if(!items.length)return `<p class="empty-list">${type==='ingredient'?'No ingredients found in the markup.':'No cookware marked in this recipe.'}</p>`;
+  if(type==='ingredient')return `<ul class="ingredient-list">${items.map((item,index)=>{
+    const amount=quantityText(item.quantity);
+    return `<li><input class="ingredient-check" type="checkbox" id="ing-${index}" data-ingredient-index="${index}" ${checkedIngredients.has(index)?'checked':''}><label for="ing-${index}" style="flex:1"><span class="ingredient-main">${amount?`<span class="ingredient-amount">${esc(amount)}</span>`:''}<span class="ingredient-name">${esc(item.name)}</span>${item.optional?'<span class="optional">optional</span>':''}</span>${item.preparation?`<span class="ingredient-prep">${esc(item.preparation)}</span>`:''}</label></li>`;
+  }).join('')}</ul>`;
+  return `<ul class="cookware-list">${items.map(item=>{
+    const amount=quantityText(item.quantity),count=Number(item.quantity);
+    return `<li>${icon('cookingPot')}<span>${Number.isFinite(count)&&count>1?`<span class="cookware-count">${esc(amount)}×</span> `:''}${esc(item.name)}${item.optional?' <span class="optional">optional</span>':''}</span></li>`;
+  }).join('')}</ul>`;
+}
+function ingredientTagMarkup(recipe,content){
+  const ast=recipeAst(recipe),display=recipe.display;
+  const mentions=contentItems(content).filter(item=>item.type==='ingredient'&&display.ingredientListed[item.index])
+    .map(reference=>({reference,ingredient:ast.ingredients[reference.index]}));
+  if(!mentions.length)return '';
+  return `<div class="step-ingredients" aria-label="Ingredients used in this step">${mentions.map(({reference,ingredient})=>{
+    const amount=quantityText(display.ingredientQuantities[reference.index]);
+    return `<span class="step-ingredient-tag">${amount?`<b>${esc(amount)}</b> `:''}${esc(display.ingredientNames[reference.index])}${ingredient.note?` <span class="step-tag-prep">· ${esc(ingredient.note)}</span>`:''}${display.ingredientOptional[reference.index]?' <em>optional</em>':''}</span>`;
+  }).join('')}</div>`;
+}
+function inlineItemMarkup(recipe,item){
+  const ast=recipeAst(recipe),display=recipe.display;
+  if(item.type==='text')return esc(item.value).replace(/\n/g,'<br>');
+  if(item.type==='ingredient'){
+    const ingredient=ast.ingredients[item.index];
+    const name=display.ingredientNames[item.index],optional=display.ingredientOptional[item.index];
+    return `<span class="inline-ingredient" title="Ingredient${optional?' (optional)':''}">${esc(name)}${optional?' · optional':''}</span>${ingredient.note?` <span class="inline-preparation">(${esc(ingredient.note)})</span>`:''}`;
+  }
+  if(item.type==='cookware'){
+    const optional=display.cookwareOptional[item.index];
+    return `<span class="inline-cookware" title="Cookware">${esc(display.cookwareNames[item.index])}</span>${optional?' <span class="optional">optional</span>':''}`;
+  }
+  if(item.type==='timer'){
+    const timer=ast.timers[item.index];
+    return `<span class="inline-timer">${icon('clock')} ${esc([timer.name,quantityText(display.timerQuantities[item.index])].filter(Boolean).join(' '))}</span>`;
+  }
+  if(item.type==='inlineQuantity')return esc(quantityText(display.inlineQuantities[item.index]));
+  return '';
+}
+function stepItemsMarkup(recipe,items){return items.map(item=>inlineItemMarkup(recipe,item)).join('');}
+function contentTextMarkup(recipe,content){
+  if(content.type==='text')return esc(content.value).replace(/\n/g,'<br>');
+  if(content.type==='step')return stepItemsMarkup(recipe,contentItems(content));
+  return '';
+}
+function noteMarkup(texts){
+  const notes=Array.isArray(texts)?texts:[texts];
+  return `<aside class="notes-box"><h3>Notes</h3>${notes.map(text=>`<p>${esc(text).replace(/\n/g,'<br>')}</p>`).join('')}</aside>`;
 }
 
-function servingSource(meta){
-  for(const key of ['servings','serves','portions','yield']){
-    const value=meta?.[key];
-    if(value!==undefined&&value!==null&&human(value).trim()) return {key, value, label:human(value)};
-  }
-  return null;
-}
-function parseServingNumber(value){
-  const s=String(value??'').trim();
-  const number='(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:\\.\\d+)?)';
-  const range=new RegExp('^\\s*('+number+')\\s*(?:[-–—]|\\bto\\b)\\s*('+number+')','i').exec(s);
-  const asNumber = raw => {
-    const n=raw.trim(); let m;
-    if((m=/^(\d+)\s+(\d+)\/(\d+)$/.exec(n))) return Number(m[1])+Number(m[2])/Number(m[3]);
-    if((m=/^(\d+)\/(\d+)$/.exec(n))) return Number(m[1])/Number(m[2]);
-    return Number(n);
-  };
-  if(range){const a=asNumber(range[1]),b=asNumber(range[2]); if(Number.isFinite(a)&&Number.isFinite(b))return (a+b)/2;}
-  const first=new RegExp(number).exec(s);
-  if(first){const n=asNumber(first[0]);if(Number.isFinite(n))return n;}
-  return null;
+function renderServingControl(){
+  const label=declaredServings&&Math.abs(selectedServings-baseServings)<0.00001?originalServingLabel:`${selectedServings} ${selectedServings===1?'serving':'servings'}`;
+  const helper=declaredServings?`Original servings: ${esc(originalServingLabel)}`:'Original servings not specified';
+  return `<div class="serving-control"><div class="serving-copy"><span class="serving-label">Servings</span><span class="serving-current">${esc(label)}</span><span class="serving-helper">${helper}</span></div><div class="serving-stepper"><button type="button" id="serving-minus" aria-label="Decrease servings" ${selectedServings<=1?'disabled':''}>${icon('minus')}</button><output id="serving-count" aria-live="polite">${selectedServings}</output><button type="button" id="serving-plus" aria-label="Increase servings" ${selectedServings>=100?'disabled':''}>${icon('plus')}</button></div></div>`;
 }
 function servingStateFor(meta){
-  const source=servingSource(meta);
-  if(source){
-    const parsed=parseServingNumber(source.label);
-    if(parsed!==null&&parsed>0){
-      originalServingLabel=source.label;
-      declaredServings=true;
-      baseServings=Math.max(1,Math.round(parsed));
-      selectedServings=baseServings;
-      return;
-    }
+  const value=meta.servings??meta.serves??meta.yield;
+  const label=human(value).trim();
+  const numericValue=typeof value==='number'?value:Number.parseFloat(label);
+  const servings=numericValue;
+  if(value!==undefined&&value!==null&&String(value).trim()!==''&&Number.isFinite(servings)&&servings>0){
+    originalServingLabel=label;
+    declaredServings=true;
+    baseServings=Math.max(1,Math.round(servings));
+    selectedServings=baseServings;
+    return;
   }
   declaredServings=false;
   originalServingLabel='';
   baseServings=2;
   selectedServings=2;
 }
+
 function scaleFactor(){return selectedServings/Math.max(1,baseServings);}
-
-function fractionValue(raw){
-  const s=String(raw).trim(); let m;
-  if((m=/^(\d+)\s+(\d+)\/(\d+)$/.exec(s))) return Number(m[1])+Number(m[2])/Number(m[3]);
-  if((m=/^(\d+)\/(\d+)$/.exec(s))) return Number(m[1])/Number(m[2]);
-  if(/^\d+(?:\.\d+)?$/.test(s)) return Number(s);
-  return null;
-}
-function formatCulinaryNumber(value){
-  if(!Number.isFinite(value)) return String(value);
-  if(Math.abs(value)<0.000001) return '0';
-  const whole=Math.floor(value+1e-8), frac=value-whole;
-  if(frac<0.015) return String(whole);
-  const denominators=[2,3,4,5,6,8,10,12,16];
-  let best=null;
-  for(const den of denominators){
-    const num=Math.round(frac*den);const err=Math.abs(frac-num/den);
-    if(!best||err<best.err)best={den,num,err};
-  }
-  if(best&&best.err<0.015){
-    if(best.num===best.den)return String(whole+1);
-    const common=(a,b)=>b?common(b,a%b):a;
-    const gcd=common(best.num,best.den);const n=best.num/gcd,d=best.den/gcd;
-    return (whole?whole+' ':'')+n+'/'+d;
-  }
-  return (Math.round(value*100)/100).toString();
-}
-function scaledQuantity(quantity, unit, factor){
-  const q=String(quantity??'').trim(); const u=String(unit??'').trim();
-  if(!q) return u;
-  if(Math.abs(factor-1)<0.000001) return [q,u].filter(Boolean).join(' ');
-  const number='(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:\\.\\d+)?)';
-  const re=new RegExp('^\\s*('+number+')(?:\\s*[-–—]\\s*('+number+'))?(.*)$');
-  const m=re.exec(q);
-  if(!m) return [q,u].filter(Boolean).join(' ');
-  const a=fractionValue(m[1]);const b=m[2]?fractionValue(m[2]):null;
-  if(a===null|| (m[2]&&b===null)) return [q,u].filter(Boolean).join(' ');
-  const left=formatCulinaryNumber(a*factor);
-  const amount=m[2]?`${left}–${formatCulinaryNumber(b*factor)}`:left;
-  const rest=(m[3]||'').trim();
-  const remaining=[rest,u].filter(Boolean).filter((v,i,a)=>i===0||v.toLowerCase()!==a[0].toLowerCase()).join(' ');
-  return [amount,remaining].filter(Boolean).join(' ');
-}
-function itemQuantity(item,factor){return scaledQuantity(item.quantity,item.unit,factor);}
-
-function metadataCards(meta){
-  if(!meta||typeof meta!=='object')return '';
-  const hidden=new Set(['title','tags','servings','serves','portions','yield','photo','image','photo_file','image_file']);
-  const items=Object.entries(meta).filter(([k,v])=>!hidden.has(k.toLowerCase())&&v!==undefined&&v!==null&&human(v).trim());
-  if(!items.length)return '';
-  return `<div class="metadata-table">${items.map(([k,v])=>`<div class="metadata-item"><span class="metadata-key">${esc(prettyKey(k))}</span><div class="metadata-value">${esc(human(v))}</div></div>`).join('')}</div>`;
-}
-function renderComponents(items, type, factor=1){
-  if(!items?.length)return `<p class="empty-list">${type==='ingredient'?'No ingredients found in the markup.':'No cookware marked in this recipe.'}</p>`;
-  if(type==='ingredient') return `<ul class="ingredient-list">${items.map((it,i)=>`<li><input class="ingredient-check" type="checkbox" id="ing-${i}" data-ingredient-index="${i}" ${checkedIngredients.has(i)?'checked':''}><label for="ing-${i}" style="flex:1"><span class="ingredient-main">${itemQuantity(it,factor)?`<span class="ingredient-amount">${esc(itemQuantity(it,factor))}</span>`:''}<span class="ingredient-name">${esc(it.name)}</span>${it.optional?'<span class="optional">optional</span>':''}</span>${it.preparation?`<span class="ingredient-prep">${esc(it.preparation)}</span>`:''}</label></li>`).join('')}</ul>`;
-  return `<ul class="cookware-list">${items.map(it=>`<li>${icon('cookingPot')}<span>${esc(it.name)}${it.optional?' <span class="optional">optional</span>':''}</span></li>`).join('')}</ul>`;
-}
-function stepIngredientMarkup(parts,factor){
-  // Preserve every occurrence. The same ingredient can be used more than once
-  // in a single step, and each occurrence gets its own tag.
-  const list=(parts||[]).filter(p=>p.type==='ingredient');
-  if(!list.length)return '';
-  return `<div class="step-ingredients" aria-label="Ingredients used in this step">${list.map(p=>{
-    const amount=scaledQuantity(p.quantity,p.unit,factor);
-    return `<span class="step-ingredient-tag">${amount?`<b>${esc(amount)}</b> `:''}${esc(p.name)}${p.preparation?` <span class="step-tag-prep">· ${esc(p.preparation)}</span>`:''}${p.optional?' <em>optional</em>':''}</span>`;
-  }).join('')}</div>`;
-}
-function renderServingControl(){
-  const label=declaredServings&&Math.abs(selectedServings-baseServings)<0.00001?originalServingLabel:`${selectedServings} ${selectedServings===1?'serving':'servings'}`;
-  const helper=declaredServings?`From original yield: ${esc(originalServingLabel)}`:'Original yield not specified';
-  return `<div class="serving-control"><div class="serving-copy"><span class="serving-label">Servings</span><span class="serving-current">${esc(label)}</span><span class="serving-helper">${helper}</span></div><div class="serving-stepper"><button type="button" id="serving-minus" aria-label="Decrease servings" ${selectedServings<=1?'disabled':''}>${icon('minus')}</button><output id="serving-count" aria-live="polite">${selectedServings}</output><button type="button" id="serving-plus" aria-label="Increase servings" ${selectedServings>=100?'disabled':''}>${icon('plus')}</button></div></div>`;
-}
 async function loadRecipe(id){
   app.innerHTML='<div class="loading"><span class="spinner"></span> Loading recipe…</div>';
-  try{
-    const response=await fetch('/api/recipes/'+id.split('/').map(encodeURIComponent).join('/'),{cache:'no-store'});
-    const data=await response.json(); if(!response.ok)throw new Error(data.error||'Recipe not found');
-    renderRecipe(data,true);
-  }catch(e){
-    app.innerHTML=`<div class="error-banner">Couldn't open this recipe. ${esc(e.message)}</div><button class="retry-button" id="retry-connection" type="button">Try again</button>`;
-    document.getElementById('retry-connection')?.addEventListener('click', () => loadRecipe(id));
-  }
+  try{const response=await fetch('/api/recipes/'+id.split('/').map(encodeURIComponent).join('/'),{cache:'no-store'});const data=await response.json();if(!response.ok)throw new Error(data.error||'Recipe not found');renderRecipe(data,true);}
+  catch(e){app.innerHTML=`<div class="error-banner">Couldn't open this recipe. ${esc(e.message)}</div><button class="retry-button" id="retry-connection" type="button">Try again</button>`;document.getElementById('retry-connection')?.addEventListener('click',()=>loadRecipe(id));}
 }
-function renderRecipe(r=currentRecipe, reset=false){
-  if(r)currentRecipe=r;
+function renderRecipe(recipe=currentRecipe,reset=false){
+  if(recipe)currentRecipe=recipe;
   if(!currentRecipe)return;
-  r=currentRecipe;
-  if(reset){servingStateFor(r.metadata||{});checkedIngredients=new Set();}
-  const meta=r.metadata||{};const factor=scaleFactor();
-  const grouped=[];let current='';
-  for(const step of (r.steps||[])){
-    if(step.section!==current){current=step.section;if(current)grouped.push({kind:'section',title:current});}
-    grouped.push({kind:'step',step});
+  recipe=currentRecipe;
+  if(recipe.parser_error){app.innerHTML=`<div class="error-banner">This recipe could not be parsed: ${esc(recipe.parser_error)}</div><details class="raw-toggle" open><summary>View original Cooklang source</summary><pre>${esc(recipe.source||'')}</pre></details>`;return;}
+  const ast=recipeAst(recipe),meta=recipeMetadata(recipe);
+  if(reset){servingStateFor(meta);checkedIngredients=new Set();}
+  const ingredients=sidebarIngredients(recipe),cookware=sidebarCookware(recipe);
+  const title=String(meta.title||recipe.id.replace(/\.cook(?:\.txt)?$|\.txt$/i,'').replace(/[_-]/g,' ')||'Untitled recipe');
+  const tags=recipeTags(meta),photo=recipe.photo_available?`<img class="recipe-photo" src="${esc(photoUrl(recipe.id,'detail',recipe.photo_version))}" alt="${esc(title)}" onerror="this.remove();this.parentElement.classList.add('photo-missing')">`:'';
+  let stepNumber=0,currentSection='',stepsMarkup='';
+  for(const [sectionIndex,section] of astSections(ast).entries()){
+    const sectionName=section.name||'';
+    const sectionTextBlocks=recipe.text_blocks?.[sectionIndex]||[];
+    const notesOnly=sectionName.trim().toLocaleLowerCase()==='notes'
+      &&section.content.length>0
+      &&section.content.every((content,index)=>sectionTextBlocks[index]||content.type==='textBlock');
+    if(sectionName&&sectionName!==currentSection&&!notesOnly){stepsMarkup+=`<h3 class="section-label">${esc(sectionName)}</h3>`;}
+    currentSection=sectionName;
+    for(let contentIndex=0;contentIndex<section.content.length;contentIndex++){
+      const content=section.content[contentIndex];
+      const isTextBlock=Boolean(sectionTextBlocks[contentIndex])||content.type==='textBlock';
+      if(isTextBlock){
+        const notes=[];
+        while(contentIndex<section.content.length){
+          const candidate=section.content[contentIndex];
+          const candidateIsTextBlock=Boolean(sectionTextBlocks[contentIndex])||candidate.type==='textBlock';
+          if(!candidateIsTextBlock)break;
+          const value=candidate.value;
+          notes.push(typeof value==='string'?value:Array.isArray(value)?value.map(part=>part.value??part.text??'').join(''):human(value));
+          contentIndex++;
+        }
+        contentIndex--;
+        stepsMarkup+=noteMarkup(notes);
+        continue;
+      }
+      if(content.type!=='step'&&content.type!=='text')continue;
+      const markup=contentTextMarkup(recipe,content);
+      if(!markup.trim())continue;
+      stepNumber++;
+      stepsMarkup+=`<article class="step"><div class="step-number">${String(stepNumber).padStart(2,'0')}</div><div class="step-body"><p>${markup}</p>${content.type==='step'?ingredientTagMarkup(recipe,content):''}</div></article>`;
+    }
   }
-  let stepNumber=0;
-  const stepsMarkup=grouped.length?grouped.map(entry=>{
-    if(entry.kind==='section')return `<h3 class="section-label">${esc(entry.title)}</h3>`;
-    stepNumber++;
-    return `<article class="step"><div class="step-number">${String(stepNumber).padStart(2,'0')}</div><div class="step-body"><p>${inlineMarkup(entry.step.parts)}</p>${stepIngredientMarkup(entry.step.parts,factor)}</div></article>`;
-  }).join(''):'<p class="empty-list">No instruction steps were detected. The original file is available below.</p>';
-  const notesMarkup=(r.notes||[]).length?`<aside class="notes-box"><h3>Cook’s notes</h3>${r.notes.map(n=>`<p>${inlineMarkup(n.parts)}</p>`).join('')}</aside>`:'';
-  const tags=(r.tags||[]).length?`<div class="recipe-tags">${tagMarkup(r.tags)}</div>`:'';
-  const photo=r.photo_available?`<img class="recipe-photo" src="${esc(photoUrl(r.id,'detail',r.photo_version))}" alt="${esc(r.title)}" onerror="this.remove();this.parentElement.classList.add('photo-missing')">`:'';
-  const ingredientCount=r.ingredients?.length||0;
+  const tagsMarkup=tags.length?`<div class="recipe-tags">${tagMarkup(tags)}</div>`:'';
   app.innerHTML=`
-    ${r.warning?`<div class="error-banner">${esc(r.warning)}</div>`:''}
-    <section class="recipe-header ${r.photo_available?'has-photo':''}"><div class="recipe-header-copy"><h1 class="recipe-title">${esc(r.title||'Untitled recipe')}</h1>${tags}<div class="recipe-deck"><span class="meta-pill">${icon('forkKnife')} <b>${ingredientCount}</b> ingredients</span><span class="meta-pill">${icon('list')} <b>${r.steps?.length||0}</b> steps</span></div>${metadataCards(meta)}</div>${photo?`<div class="recipe-photo-frame">${photo}</div>`:''}</section>
-    <div class="detail-layout"><aside class="ingredients-column"><section class="side-section"><div class="serving-row">${renderServingControl()}</div><h2 class="section-heading">Ingredients <span>(${ingredientCount})</span></h2>${renderComponents(r.ingredients,'ingredient',factor)}</section><section class="side-section"><h2 class="section-heading">${icon('cookingPot')} Cookware</h2>${renderComponents(r.cookware,'cookware')}</section></aside><section class="instructions"><h2 class="section-heading instruction-heading">${icon('list')} Method</h2>${stepsMarkup}${notesMarkup}</section></div>
-    <details class="raw-toggle"><summary>View original Cooklang source</summary><pre id="raw-source"></pre></details>`;
-  document.getElementById('raw-source').textContent=r.source || `${r.title||'Untitled recipe'}\n${(r.steps||[]).map((s,i)=>`${i+1}. ${s.text}`).join('\n\n')}`;
-  document.querySelectorAll('.ingredient-check').forEach(input=>input.addEventListener('change',e=>{
-    const index=Number(e.currentTarget.dataset.ingredientIndex);
-    if(e.currentTarget.checked)checkedIngredients.add(index);else checkedIngredients.delete(index);
-  }));
-  document.getElementById('serving-minus')?.addEventListener('click',()=>{if(selectedServings>1){selectedServings--;renderRecipe();}});
-  document.getElementById('serving-plus')?.addEventListener('click',()=>{if(selectedServings<100){selectedServings++;renderRecipe();}});
+    <section class="recipe-header ${recipe.photo_available?'has-photo':''}"><div class="recipe-header-copy"><h1 class="recipe-title">${esc(title)}</h1>${tagsMarkup}<div class="recipe-deck"><span class="meta-pill">${icon('forkKnife')} <b>${ingredients.length}</b> ingredients</span><span class="meta-pill">${icon('list')} <b>${stepNumber}</b> steps</span></div>${metadataCards(meta,recipe.photo_available)}</div>${photo?`<div class="recipe-photo-frame">${photo}</div>`:''}</section>
+    <div class="detail-layout"><aside class="ingredients-column"><section class="side-section"><div class="serving-row">${renderServingControl()}</div><h2 class="section-heading">Ingredients <span>(${ingredients.length})</span></h2>${renderComponents(ingredients,'ingredient')}</section><section class="side-section"><h2 class="section-heading">${icon('cookingPot')} Cookware</h2>${renderComponents(cookware,'cookware')}</section></aside><section class="instructions"><h2 class="section-heading instruction-heading">${icon('list')} Method</h2>${stepsMarkup||'<p class="empty-list">No instruction steps were detected. The original file is available below.</p>'}</section></div>
+    <details class="raw-toggle"><summary>View original Cooklang source</summary><pre id="raw-source"></pre></details>
+    <details class="raw-toggle"><summary>View official syntax AST</summary><pre id="raw-ast"></pre></details>`;
+  document.getElementById('raw-source').textContent=recipe.source;
+  document.getElementById('raw-ast').textContent=JSON.stringify(recipe.syntax_ast||recipeAst(recipe), null, 2);
+  document.querySelectorAll('.ingredient-check').forEach(input=>input.addEventListener('change',event=>{const index=Number(event.currentTarget.dataset.ingredientIndex);if(event.currentTarget.checked)checkedIngredients.add(index);else checkedIngredients.delete(index);}));
+  document.getElementById('serving-minus')?.addEventListener('click',()=>changeServings(-1));
+  document.getElementById('serving-plus')?.addEventListener('click',()=>changeServings(1));
 }
+async function changeServings(delta){
+  const target=selectedServings+delta;
+  if(target<1||target>100||!currentRecipe)return;
+  const id=currentRecipe.id;
+  selectedServings=target;
+  try{
+    const endpoint='/api/recipes/'+id.split('/').map(encodeURIComponent).join('/')+'?scale='+encodeURIComponent(scaleFactor());
+    const response=await fetch(endpoint,{cache:'no-store'});
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.error||'Recipe not found');
+    renderRecipe(data,false);
+  }catch(error){
+    selectedServings-=delta;
+    renderRecipe(currentRecipe,false);
+    app.insertAdjacentHTML('afterbegin',`<div class="error-banner">Couldn't scale this recipe. ${esc(error.message)}</div>`);
+  }
+}
+
 function route(){
   const hash=location.hash||'#/';
   if(hash==='#/'||hash==='#'||hash==='#/home'){currentRecipe=null;loadIndex();return;}

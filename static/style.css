@@ -564,6 +564,13 @@ body {
   color: #9aa895;
 }
 
+.cookware-count {
+  color: var(--green);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .instructions {
   min-width: 0;
 }

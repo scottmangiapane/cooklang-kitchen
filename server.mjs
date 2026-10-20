@@ -4,9 +4,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import * as yaml from 'js-yaml';
 import sharp from 'sharp';
-import { parseBatch } from './parse_recipes.mjs';
+import {
+  Parser,
+  ingredient_display_name,
+  ingredient_should_be_listed,
+  ingredient_is_optional,
+  cookware_display_name,
+  cookware_should_be_listed,
+  cookware_is_optional,
+  quantity_display,
+  grouped_quantity_display,
+} from '@cooklang/cooklang';
+
+const parser = new Parser();
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const resolveRoot = value => {
@@ -19,7 +30,7 @@ const IMAGE_CACHE_DIR = path.resolve(process.env.IMAGE_CACHE_DIR || '/image-cach
 const RECIPE_CACHE_DIR = path.resolve(process.env.RECIPE_CACHE_DIR || '/recipe-cache');
 const PORT = 8080;
 const RECIPE_SUFFIXES = ['.cook', '.txt'];
-const RECIPE_CACHE_VERSION = 2;
+const RECIPE_CACHE_VERSION = 8;
 const IMAGE_SIZES = { card: { width: 800, height: 560 }, detail: { width: 1440, height: 1200 } };
 const IMAGE_MIMES = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
@@ -37,54 +48,123 @@ function hash(value, length = 32) {
   return crypto.createHash('sha256').update(value).digest('hex').slice(0, length);
 }
 
-function safeMetadata(value) {
-  if (value == null || ['string', 'number', 'boolean'].includes(typeof value)) return value;
+function toJsonValue(value) {
+  if (value === undefined || value === null || ['string', 'number', 'boolean'].includes(typeof value)) return value;
   if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map(safeMetadata);
+  if (Array.isArray(value)) return value.map(toJsonValue);
+  if (value instanceof Map) {
+    return Object.fromEntries([...value].map(([key, item]) => [String(key), toJsonValue(item)]));
+  }
   if (typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, safeMetadata(item)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, toJsonValue(item)]));
   }
   return String(value);
 }
 
-function splitFrontMatter(source) {
-  const match = /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(source);
-  if (!match) {
-    return {
-      metadata: {}, body: source,
-      warning: source.startsWith('---') ? "Front matter starts with '---' but its closing delimiter was not found." : null,
-    };
-  }
-
-  try {
-    const metadata = yaml.load(match[1], { schema: yaml.JSON_SCHEMA }) ?? {};
-    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
-      return { metadata: {}, body: source.slice(match[0].length), warning: 'Front matter must be a YAML mapping; metadata was ignored.' };
-    }
-    return { metadata: safeMetadata(metadata), body: source.slice(match[0].length), warning: null };
-  } catch (error) {
-    return {
-      metadata: {}, body: source.slice(match[0].length),
-      warning: `Could not parse YAML metadata (${error?.name || 'Error'}); recipe text was still loaded.`,
-    };
-  }
+function recipeAst(recipe) {
+  return recipe?.recipe;
 }
 
-function extractNotes(body) {
-  const notes = [];
-  const keptBlocks = body.replace(/\\[ \t]*\r?\n/g, '\n').split(/\n\s*\n+/).map(block => {
-    const lines = block.split(/\r?\n/).map(line => line.replace(/[ \t]+$/, '')).filter(line => line.trim());
-    if (!lines.length || !lines[0].trimStart().startsWith('>')) return block;
-    const noteLines = [];
-    const otherLines = [];
-    for (const line of lines) {
-      (line.trimStart().startsWith('>') ? noteLines : otherLines).push(line);
+function recipeMetadata(recipe) {
+  if (recipe?.display_metadata) return recipe.display_metadata;
+
+  // The JS bindings expose `recipe.raw_metadata` as the Metadata wrapper,
+  // with its original key/value pairs in `.map`. Older API shapes are kept
+  // only as compatibility fallbacks.
+  const rawMetadata = recipe?.recipe?.raw_metadata;
+  const raw = toJsonValue(rawMetadata?.map ?? rawMetadata ?? recipe?.recipe?.metadata?.map ?? {});
+  const interpreted = toJsonValue(recipe?.metadata || {});
+  const metadata = { ...raw, ...(interpreted.custom || {}) };
+
+  // Prefer the parser's interpreted standard fields where useful, while
+  // retaining custom and standard keys exactly as written in the raw map.
+  const standardFields = [
+    ['title', interpreted.title, []],
+    ['description', interpreted.description, ['introduction']],
+    ['tags', interpreted.tags, ['tag']],
+    ['author', interpreted.author, []],
+    ['source', interpreted.source, []],
+    ['course', interpreted.course, ['category']],
+    ['servings', interpreted.servings, ['serves', 'yield']],
+    ['difficulty', interpreted.difficulty, []],
+    ['cuisine', interpreted.cuisine, []],
+    ['diet', interpreted.diet, []],
+    ['image', interpreted.images, ['images', 'picture', 'pictures']],
+    ['locale', interpreted.locale, []],
+  ];
+  for (const [key, value, aliases] of standardFields) {
+    if (value !== undefined && value !== null) metadata[key] = value;
+    if (value !== undefined && value !== null) {
+      for (const alias of aliases) delete metadata[alias];
     }
-    const note = noteLines.map(line => line.replace(/^\s*>\s?/, '')).join('\n').trim();
-    if (note) notes.push(note);
-    return otherLines.join('\n');
-  });
-  return { body: keptBlocks.join('\n\n'), notes };
+  }
+
+  // Keep the source's human-readable time values (e.g. "20 minutes") rather
+  // than replacing them with the parser's interpreted minute-count object.
+  return metadata;
+}
+
+function parseOfficialAst(source) {
+  // `parse_ast` is the official structure-preserving parse. The full Recipe
+  // model below remains the source of scaled quantities and component indexes.
+  const result = parser.parse_ast(source, true);
+  if (!result?.value || result.value === '<no output>') {
+    throw new Error('The official Cooklang parser did not return an AST.');
+  }
+  return JSON.parse(result.value);
+}
+
+function textBlockMap(ast, recipe) {
+  const sections = recipe?.sections || [];
+  const result = sections.map(section => (section.content || []).map(() => false));
+  let sectionIndex = 0;
+  let contentIndex = 0;
+  let hasSection = false;
+  let hasContentInCurrentSection = false;
+
+  for (const block of ast?.blocks || []) {
+    if (!block || typeof block !== 'object') continue;
+    const type = Object.keys(block)[0];
+    if (type === 'Section') {
+      // The full parse omits an empty, unnamed default section. If source
+      // content preceded the first header, however, that section is retained.
+      if (hasSection || hasContentInCurrentSection) sectionIndex += 1;
+      hasSection = true;
+      contentIndex = 0;
+      hasContentInCurrentSection = false;
+      continue;
+    }
+
+    if (type !== 'Step' && type !== 'TextBlock') continue;
+    if (result[sectionIndex] && contentIndex < result[sectionIndex].length) {
+      result[sectionIndex][contentIndex] = type === 'TextBlock';
+    }
+    contentIndex += 1;
+    hasContentInCurrentSection = true;
+  }
+
+  return result;
+}
+
+function recipeDisplayHelpers(parsed) {
+  const ast = parsed.recipe;
+  return {
+    ingredientNames: ast.ingredients.map(ingredient_display_name),
+    ingredientListed: ast.ingredients.map(ingredient_should_be_listed),
+    ingredientOptional: ast.ingredients.map(ingredient_is_optional),
+    ingredientQuantities: ast.ingredients.map(ingredient => ingredient.quantity ? quantity_display(ingredient.quantity) : ''),
+    cookwareNames: ast.cookware.map(cookware_display_name),
+    cookwareListed: ast.cookware.map(cookware_should_be_listed),
+    cookwareOptional: ast.cookware.map(cookware_is_optional),
+    timerQuantities: ast.timers.map(timer => timer.quantity ? quantity_display(timer.quantity) : ''),
+    inlineQuantities: ast.inline_quantities.map(quantity_display),
+    groupedIngredients: parser.group_ingredients(parsed)
+      .filter(({ index }) => ingredient_should_be_listed(ast.ingredients[index]))
+      .map(({ index, quantity }) => ({ index, quantity: grouped_quantity_display(quantity) })),
+    groupedCookware: parser.group_cookware(parsed)
+      .filter(({ index }) => cookware_should_be_listed(ast.cookware[index]))
+      .map(({ index, quantity }) => ({ index, quantity: grouped_quantity_display(quantity) })),
+  };
 }
 
 function recipeBaseName(recipePath) {
@@ -123,8 +203,9 @@ function safeExistingPath(candidate) {
 }
 
 function recipePhotoPath(recipePath, metadata = {}) {
-  for (const key of ['photo', 'image', 'photo_file', 'image_file']) {
-    const value = metadata?.[key];
+  const imageValues = ['image', 'images', 'picture', 'pictures']
+    .flatMap(key => Array.isArray(metadata?.[key]) ? metadata[key] : [metadata?.[key]]);
+  for (const value of imageValues) {
     if (typeof value !== 'string' || !value.trim() || path.isAbsolute(value.trim())) continue;
     const found = safeExistingPath(path.resolve(path.dirname(recipePath), value.trim()));
     if (found && IMAGE_MIMES[path.extname(found).toLowerCase()] && fs.statSync(found).isFile()) return found;
@@ -242,72 +323,49 @@ function writeRecipeCache(relativeId, signature, recipe) {
   }
 }
 
-function prepareParserInput(recipePath) {
+function parseRecipeSource(recipePath, source, scale = 1) {
   const relativeId = path.relative(ROOT, recipePath).split(path.sep).join('/');
-  const source = fs.readFileSync(recipePath, 'utf8');
-  const { metadata, body, warning } = splitFrontMatter(source);
-  const { body: recipeBody, notes } = extractNotes(body);
-  return {
-    request: { id: relativeId, source: recipeBody, notes, fallback_title: recipeDisplayName(recipePath), front_matter_warning: warning },
-    source,
-    metadata,
-    warning,
-    relativeId,
-  };
-}
-
-function finishRecipe(recipePath, source, yamlMetadata, frontMatterWarning, parserResult) {
-  const relativeId = path.relative(ROOT, recipePath).split(path.sep).join('/');
-  if (parserResult?.error) {
-    return {
-      id: relativeId, title: recipeDisplayName(recipePath) || 'Untitled recipe', tags: [],
-      metadata: safeMetadata(yamlMetadata), ingredients: [], cookware: [], timers: [], steps: [], notes: [], sections: [],
-      warning: `Could not parse this file with the official Cooklang parser (${parserResult.error}).`,
-      photo_available: false, photo_version: '', source_name: path.basename(recipePath), source,
-    };
+  const parsed = parser.parse(source, scale);
+  const payload = toJsonValue(parsed);
+  if (!payload?.recipe || !Array.isArray(payload.recipe.sections)) {
+    throw new Error('The official Cooklang parser returned an unexpected recipe structure.');
   }
 
-  const recipe = parserResult?.recipe || {};
-  const parserMetadata = recipe.metadata && typeof recipe.metadata === 'object' ? recipe.metadata : {};
-  const metadata = { ...parserMetadata, ...(yamlMetadata && typeof yamlMetadata === 'object' ? yamlMetadata : {}) };
-  const title = normal(metadata.title || recipe.title || recipeDisplayName(recipePath)) || 'Untitled recipe';
-  let tags = metadata.tags ?? recipe.tags ?? [];
-  if (typeof tags === 'string') tags = tags.split(/[,;]/).map(tag => tag.trim()).filter(Boolean);
-  else if (!Array.isArray(tags)) tags = tags ? [String(tags)] : [];
-  tags = tags.map(normal).filter(Boolean);
-  const photo = recipePhotoPath(recipePath, metadata);
-  const warning = frontMatterWarning || recipe.warning || null;
+  const syntaxAst = parseOfficialAst(source);
 
-  return {
-    id: relativeId, title, tags, metadata: safeMetadata(metadata),
-    ingredients: recipe.ingredients || [], cookware: recipe.cookware || [], timers: recipe.timers || [],
-    steps: recipe.steps || [], notes: recipe.notes || [], sections: recipe.sections || [], warning,
-    photo_available: Boolean(photo), photo_version: photoVersion(photo),
-    source_name: path.basename(recipePath), source,
+  const recipe = {
+    ...payload,
+    display: recipeDisplayHelpers(parsed),
+    syntax_ast: syntaxAst,
+    text_blocks: textBlockMap(syntaxAst, payload.recipe),
+    id: relativeId,
+    source,
+    source_name: path.basename(recipePath),
   };
+  recipe.display_metadata = recipeMetadata(recipe);
+  const photo = recipePhotoPath(recipePath, recipeMetadata(recipe));
+  recipe.photo_available = Boolean(photo);
+  recipe.photo_version = photoVersion(photo);
+  return recipe;
 }
 
 function parseUncachedPaths(entries) {
-  if (!entries.length) return;
-  try {
-    const prepared = entries.map(([recipePath, signature]) => ({ ...prepareParserInput(recipePath), recipePath, signature }));
-    const results = new Map(parseBatch(prepared.map(item => item.request)).map(result => [result.id, result]));
-    for (const item of prepared) {
-      const result = results.get(item.relativeId) || { error: 'The parser returned no result.' };
-      const recipe = finishRecipe(item.recipePath, item.source, item.metadata, item.warning, result);
-      parsedRecipes.set(item.relativeId, { signature: item.signature, recipe });
-      writeRecipeCache(item.relativeId, item.signature, recipe);
-    }
-  } catch (error) {
-    console.log(`Cooklang parser batch failed: ${error?.name || 'Error'}`);
-    for (const [recipePath, signature] of entries) {
-      const relativeId = path.relative(ROOT, recipePath).split(path.sep).join('/');
-      const memory = parsedRecipes.get(relativeId);
-      if (memory && JSON.stringify(memory.signature) === JSON.stringify(signature)) continue;
-      let source = '';
-      try { source = fs.readFileSync(recipePath, 'utf8'); } catch { /* Unreadable recipe. */ }
-      const { metadata, warning } = splitFrontMatter(source);
-      const recipe = finishRecipe(recipePath, source, metadata, warning, { error: `Parser service failed (${error?.name || 'Error'})` });
+  for (const [recipePath, signature] of entries) {
+    const relativeId = path.relative(ROOT, recipePath).split(path.sep).join('/');
+    try {
+      const source = fs.readFileSync(recipePath, 'utf8');
+      const recipe = parseRecipeSource(recipePath, source, 1);
+      parsedRecipes.set(relativeId, { signature, recipe });
+      writeRecipeCache(relativeId, signature, recipe);
+    } catch (error) {
+      const recipe = {
+        id: relativeId,
+        source: fs.existsSync(recipePath) ? fs.readFileSync(recipePath, 'utf8') : '',
+        source_name: path.basename(recipePath),
+        parser_error: String(error?.message || error),
+        photo_available: false,
+        photo_version: '',
+      };
       parsedRecipes.set(relativeId, { signature, recipe, retry: true });
     }
   }
@@ -315,13 +373,18 @@ function parseUncachedPaths(entries) {
 
 function refreshPhotoFields(recipe, recipePath) {
   const result = { ...recipe };
-  const photo = recipePhotoPath(recipePath, result.metadata);
+  const photo = recipePhotoPath(recipePath, recipeMetadata(result));
   result.photo_available = Boolean(photo);
   result.photo_version = photoVersion(photo);
   return result;
 }
 
-function parseRecipe(recipePath) {
+function parseRecipe(recipePath, scale = 1) {
+  if (scale !== 1) {
+    const source = fs.readFileSync(recipePath, 'utf8');
+    return parseRecipeSource(recipePath, source, scale);
+  }
+
   const relativeId = path.relative(ROOT, recipePath).split(path.sep).join('/');
   const signature = fileSignature(recipePath);
   const cached = readRecipeCache(relativeId, signature);
@@ -378,12 +441,37 @@ function loadRecipeLibrary() {
 }
 
 function listRecipes() {
-  return loadRecipeLibrary().map(recipe => ({
-    id: recipe.id, title: recipe.title, tags: recipe.tags,
-    ingredient_count: recipe.ingredients.length, step_count: recipe.steps.length,
-    photo_available: recipe.photo_available, photo_version: recipe.photo_version || '',
-    ...(recipe.warning ? { warning: recipe.warning } : {}),
-  }));
+  return loadRecipeLibrary().map(recipe => {
+    if (recipe.parser_error) {
+      return {
+        id: recipe.id,
+        title: recipeDisplayName(recipe.id) || 'Untitled recipe',
+        tags: [],
+        ingredient_count: 0,
+        step_count: 0,
+        photo_available: false,
+        photo_version: '',
+        parser_error: recipe.parser_error,
+      };
+    }
+    const ast = recipe.recipe;
+    const metadata = recipeMetadata(recipe);
+    const title = normal(metadata.title || recipeDisplayName(recipe.id)) || 'Untitled recipe';
+    const tags = (metadata.tags || []).map(normal).filter(Boolean);
+    const stepCount = ast.sections.reduce((count, section, sectionIndex) => count
+      + section.content.filter((content, contentIndex) => content.type === 'step'
+        || content.type === 'text' && content.value.trim()
+          && !recipe.text_blocks?.[sectionIndex]?.[contentIndex]).length, 0);
+    return {
+      id: recipe.id,
+      title,
+      tags,
+      ingredient_count: recipe.display.groupedIngredients.length,
+      step_count: stepCount,
+      photo_available: recipe.photo_available,
+      photo_version: recipe.photo_version,
+    };
+  });
 }
 
 function recipePathFromId(id) {
@@ -435,9 +523,8 @@ async function handleRequest(req, res) {
     const recipePath = recipePathFromId(pathname.slice('/api/photos/'.length));
     if (!recipePath) { send(res, 'Photo not found', 'text/plain; charset=utf-8', 404); return; }
     try {
-      const source = fs.readFileSync(recipePath, 'utf8');
-      const { metadata } = splitFrontMatter(source);
-      const photo = recipePhotoPath(recipePath, metadata);
+      const recipe = parseRecipe(recipePath);
+      const photo = recipePhotoPath(recipePath, recipeMetadata(recipe));
       if (!photo) { send(res, 'Photo not found', 'text/plain; charset=utf-8', 404); return; }
       const { data, contentType } = await optimizedPhoto(photo, url.searchParams.get('size') || 'detail');
       send(res, data, contentType, 200, 'public, max-age=31536000, immutable');
@@ -449,18 +536,25 @@ async function handleRequest(req, res) {
 
   if (pathname.startsWith('/api/recipes/')) {
     const id = pathname.slice('/api/recipes/'.length);
+    const scale = Number(url.searchParams.get('scale') ?? 1);
+    if (!Number.isFinite(scale) || scale <= 0 || scale > 100) {
+      sendJson(res, { error: 'Scale must be a number greater than 0 and at most 100.' }, 400);
+      return;
+    }
     const recipePath = recipePathFromId(id);
     if (!recipePath) { sendJson(res, { error: 'Recipe not found.' }, 404); return; }
     try {
-      sendJson(res, parseRecipe(recipePath));
+      sendJson(res, parseRecipe(recipePath, scale));
     } catch (error) {
       let source = '';
       try { source = fs.readFileSync(recipePath, 'utf8'); } catch { /* Keep fallback response useful. */ }
       sendJson(res, {
-        id, title: recipeDisplayName(recipePath) || 'Untitled recipe', tags: [], metadata: {},
-        ingredients: [], cookware: [], timers: [], steps: [], notes: [], sections: [],
-        warning: `Could not parse this file (${error?.name || 'Error'}).`,
-        photo_available: false, photo_version: '', source,
+        id,
+        source,
+        source_name: path.basename(recipePath),
+        parser_error: String(error?.message || error),
+        photo_available: false,
+        photo_version: '',
       });
     }
     return;

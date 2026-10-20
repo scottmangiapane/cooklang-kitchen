@@ -4,10 +4,24 @@
 
 <p align="center">A lightweight, self-hosted browser for Cooklang recipes.</p>
 
+## Features
+
+- Browse and search a personal recipe collection, with optional recipe photos and tags.
+- Read Cooklang instructions with linked ingredients, cookware, and timers.
+- View official Cooklang notes, sections, and recipe front matter.
+- Scale ingredient quantities with the serving controls, including the instruction-step ingredient tags and consolidated sidebar list.
+- Cache recipe data and optimized photos for faster browsing.
+
+## Parsing and rendering
+
+Cooklang syntax is parsed by the official `@cooklang/cooklang` WASM bindings to `cooklang-rs`. The viewer uses the full parsed recipe returned by `Parser.parse()` for sections, components, quantities, metadata, and scaling. It also asks `Parser.parse_ast()` for the official source-structure AST because the full recipe model intentionally represents both plain text and note blocks as text content. The AST is used only to preserve the parser's `TextBlock` distinction for note styling; there is no second Cooklang parser in the application.
+
+Standard metadata is read from the parser's `raw_metadata` map and interpreted metadata fields, so custom keys and standard fields such as `source`, `prep time`, `cook time`, and `servings` can all reach the UI. The displayed metadata table omits values already surfaced elsewhere on the page.
+
 ## Screenshots
 
-![demo](/screenshots/main-page.png)
-![demo](/screenshots/recipe-page.png)
+![Recipe collection](/screenshots/main-page.png)
+![Recipe detail](/screenshots/recipe-page.png)
 
 ## Run it
 
@@ -41,8 +55,6 @@ docker compose down
 
 ## Recipes and photos
 
-The backend runs entirely on Node.js. Recipe syntax is parsed by the official [`@cooklang/cooklang`](https://www.npmjs.com/package/@cooklang/cooklang) package, which uses the Rust parser from [`cooklang-rs`](https://github.com/cooklang/cooklang-rs). YAML front matter is handled by `js-yaml`; parsed recipe data is cached on disk in the `recipe-cache` Docker volume and reused until a source file changes. Ordinary home-page loads scan recipe file metadata without reparsing unchanged recipes. A malformed recipe does not prevent other recipes from loading.
+The app supports Cooklang recipes with YAML front matter, sections, notes, ingredients, cookware, and timers. Photos are optional: put an image beside a recipe with the same base name, or set `photo:`/`image:` to a relative path in front matter. JPG, PNG, WebP, AVIF, and GIF are supported.
 
-Cooklang front matter and the app's Markdown blockquote notes are handled around the official parser. Photos are optional: put an image beside a recipe with the same base name, or set `photo:`/`image:` to a relative path in front matter. JPG, PNG, WebP, AVIF, and GIF are supported. Sharp generates cached WebP thumbnails for recipe cards and detail pages in the `image-cache` Docker volume; originals remain unchanged, and thumbnails are refreshed when source images change. GIF thumbnails use the first frame. Parsed recipe data lives separately from image thumbnails, so the caches can be managed independently.
-
-On a recipe page, use the serving controls to scale ingredient quantities in the list and in each instruction step. Press `/` to focus search, or `Escape` to clear it.
+On a recipe page, use the serving controls to scale ingredient quantities. Press `/` to focus search, or `Escape` to clear it.

@@ -7,11 +7,11 @@ ENV RECIPES_DIR=/recipes \
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm install --omit=dev --no-audit --no-fund \
+RUN npm ci --omit=dev --no-audit --no-fund \
     && mkdir -p /image-cache /recipe-cache \
     && chown -R node:node /app /image-cache /recipe-cache
 
-COPY server.mjs parse_recipes.mjs ./
+COPY server.mjs ./
 COPY static ./static
 
 EXPOSE 8080
