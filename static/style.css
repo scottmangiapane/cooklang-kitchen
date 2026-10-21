@@ -652,11 +652,12 @@ body {
 }
 
 .notes-box {
-  margin-top: 28px;
-  padding: 18px 20px;
+  margin: 25px 0 29px;
+  padding: 18px 20px 22px;
   border-left: 3px solid #c17a5c;
+  border-bottom: 1px solid var(--line);
   background: #f2eee4;
-  border-radius: 0 8px 8px 0;
+  border-radius: 0 8px 0 0;
 }
 
 .notes-box h3 {

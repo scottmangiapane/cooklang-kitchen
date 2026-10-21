@@ -91,23 +91,27 @@ function metadataCards(meta,photoAvailable=false){
 function astSections(ast){return ast.sections;}
 function contentItems(content){return content.value.items;}
 function quantityText(text){return String(text||'').replace(/\s*°?([FC])$/i,'°$1');}
-function mergeSidebarComponents(items,{includePreparation=false}={}){
+function mergeSidebarComponents(items,{includePreparation=false,countUnquantified=false}={}){
   const totals=new Map();
   for(const item of items){
-    const amount=String(item.quantity||'').trim();
+    // Unquantified cookware entries each represent one piece of equipment.
+    // Treat those as a count of one so repeated items (e.g. three #bowl
+    // references) can be consolidated just like explicitly quantified items.
+    const sourceAmount=String(item.quantity??'').trim();
+    const amount=countUnquantified&&!sourceAmount?'1':sourceAmount;
     const match=amount.match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(.*?)$/);
-    const key=[item.name.toLocaleLowerCase(),item.optional,includePreparation?(item.preparation||'').toLocaleLowerCase():'',match?match[2].trim().toLocaleLowerCase():amount].join('\u0000');
+    const key=[item.name.toLocaleLowerCase(),item.optional,includePreparation?(item.preparation||'').toLocaleLowerCase():'',match?match[2].trim().toLocaleLowerCase():amount.toLocaleLowerCase()].join('\u0000');
     const existing=totals.get(key);
     if(existing&&match){
-      const previous=String(existing.quantity||'').match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(.*?)$/);
+      const previous=String(existing.quantity??'').match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(.*?)$/);
       if(previous){
         const sum=Number(previous[1])+Number(match[1]);
         existing.quantity=`${Number(sum.toFixed(6))}${match[2]?' '+match[2].trim():''}`;
         continue;
       }
     }
-    if(!existing)totals.set(key,{...item});
-    else totals.set(`${key}\u0000${item.index}`,{...item});
+    if(!existing)totals.set(key,{...item,quantity:amount});
+    else totals.set(`${key}\u0000${item.index}`,{...item,quantity:amount});
   }
   return [...totals.values()];
 }
@@ -130,7 +134,7 @@ function sidebarCookware(recipe){
     optional:display.cookwareOptional[index],
     quantity,
   }));
-  return mergeSidebarComponents(items);
+  return mergeSidebarComponents(items,{countUnquantified:true});
 }
 function renderComponents(items,type){
   if(!items.length)return `<p class="empty-list">${type==='ingredient'?'No ingredients found in the markup.':'No cookware marked in this recipe.'}</p>`;
@@ -140,7 +144,7 @@ function renderComponents(items,type){
   }).join('')}</ul>`;
   return `<ul class="cookware-list">${items.map(item=>{
     const amount=quantityText(item.quantity),count=Number(item.quantity);
-    return `<li>${icon('cookingPot')}<span>${Number.isFinite(count)&&count>1?`<span class="cookware-count">${esc(amount)}×</span> `:''}${esc(item.name)}${item.optional?' <span class="optional">optional</span>':''}</span></li>`;
+    return `<li>${icon('cookingPot')}<span>${amount!==''&&Number.isFinite(count)?`<span class="cookware-count">${esc(amount)}</span> `:''}${esc(item.name)}${item.optional?' <span class="optional">optional</span>':''}</span></li>`;
   }).join('')}</ul>`;
 }
 function ingredientTagMarkup(recipe,content){
@@ -223,22 +227,21 @@ function renderRecipe(recipe=currentRecipe,reset=false){
   const title=String(meta.title||recipe.id.replace(/\.cook(?:\.txt)?$|\.txt$/i,'').replace(/[_-]/g,' ')||'Untitled recipe');
   const tags=recipeTags(meta),photo=recipe.photo_available?`<img class="recipe-photo" src="${esc(photoUrl(recipe.id,'detail',recipe.photo_version))}" alt="${esc(title)}" onerror="this.remove();this.parentElement.classList.add('photo-missing')">`:'';
   let stepNumber=0,currentSection='',stepsMarkup='';
-  for(const [sectionIndex,section] of astSections(ast).entries()){
+  for(const section of astSections(ast)){
     const sectionName=section.name||'';
-    const sectionTextBlocks=recipe.text_blocks?.[sectionIndex]||[];
     const notesOnly=sectionName.trim().toLocaleLowerCase()==='notes'
       &&section.content.length>0
-      &&section.content.every((content,index)=>sectionTextBlocks[index]||content.type==='textBlock');
+      &&section.content.every(content=>content.type==='textBlock');
     if(sectionName&&sectionName!==currentSection&&!notesOnly){stepsMarkup+=`<h3 class="section-label">${esc(sectionName)}</h3>`;}
     currentSection=sectionName;
     for(let contentIndex=0;contentIndex<section.content.length;contentIndex++){
       const content=section.content[contentIndex];
-      const isTextBlock=Boolean(sectionTextBlocks[contentIndex])||content.type==='textBlock';
+      const isTextBlock=content.type==='textBlock';
       if(isTextBlock){
         const notes=[];
         while(contentIndex<section.content.length){
           const candidate=section.content[contentIndex];
-          const candidateIsTextBlock=Boolean(sectionTextBlocks[contentIndex])||candidate.type==='textBlock';
+          const candidateIsTextBlock=candidate.type==='textBlock';
           if(!candidateIsTextBlock)break;
           const value=candidate.value;
           notes.push(typeof value==='string'?value:Array.isArray(value)?value.map(part=>part.value??part.text??'').join(''):human(value));
@@ -259,10 +262,8 @@ function renderRecipe(recipe=currentRecipe,reset=false){
   app.innerHTML=`
     <section class="recipe-header ${recipe.photo_available?'has-photo':''}"><div class="recipe-header-copy"><h1 class="recipe-title">${esc(title)}</h1>${tagsMarkup}<div class="recipe-deck"><span class="meta-pill">${icon('forkKnife')} <b>${ingredients.length}</b> ingredients</span><span class="meta-pill">${icon('list')} <b>${stepNumber}</b> steps</span></div>${metadataCards(meta,recipe.photo_available)}</div>${photo?`<div class="recipe-photo-frame">${photo}</div>`:''}</section>
     <div class="detail-layout"><aside class="ingredients-column"><section class="side-section"><div class="serving-row">${renderServingControl()}</div><h2 class="section-heading">Ingredients <span>(${ingredients.length})</span></h2>${renderComponents(ingredients,'ingredient')}</section><section class="side-section"><h2 class="section-heading">${icon('cookingPot')} Cookware</h2>${renderComponents(cookware,'cookware')}</section></aside><section class="instructions"><h2 class="section-heading instruction-heading">${icon('list')} Method</h2>${stepsMarkup||'<p class="empty-list">No instruction steps were detected. The original file is available below.</p>'}</section></div>
-    <details class="raw-toggle"><summary>View original Cooklang source</summary><pre id="raw-source"></pre></details>
-    <details class="raw-toggle"><summary>View official syntax AST</summary><pre id="raw-ast"></pre></details>`;
+    <details class="raw-toggle"><summary>View original Cooklang source</summary><pre id="raw-source"></pre></details>`;
   document.getElementById('raw-source').textContent=recipe.source;
-  document.getElementById('raw-ast').textContent=JSON.stringify(recipe.syntax_ast||recipeAst(recipe), null, 2);
   document.querySelectorAll('.ingredient-check').forEach(input=>input.addEventListener('change',event=>{const index=Number(event.currentTarget.dataset.ingredientIndex);if(event.currentTarget.checked)checkedIngredients.add(index);else checkedIngredients.delete(index);}));
   document.getElementById('serving-minus')?.addEventListener('click',()=>changeServings(-1));
   document.getElementById('serving-plus')?.addEventListener('click',()=>changeServings(1));

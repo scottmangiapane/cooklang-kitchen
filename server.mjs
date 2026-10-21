@@ -30,7 +30,7 @@ const IMAGE_CACHE_DIR = path.resolve(process.env.IMAGE_CACHE_DIR || '/image-cach
 const RECIPE_CACHE_DIR = path.resolve(process.env.RECIPE_CACHE_DIR || '/recipe-cache');
 const PORT = 8080;
 const RECIPE_SUFFIXES = ['.cook', '.txt'];
-const RECIPE_CACHE_VERSION = 8;
+const RECIPE_CACHE_VERSION = 9;
 const IMAGE_SIZES = { card: { width: 800, height: 560 }, detail: { width: 1440, height: 1200 } };
 const IMAGE_MIMES = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
@@ -114,9 +114,12 @@ function parseOfficialAst(source) {
   return JSON.parse(result.value);
 }
 
-function textBlockMap(ast, recipe) {
+function annotateTextBlocksFromAst(ast, recipe) {
+  // The full parse has the analyzed quantities/components the UI needs, but
+  // currently flattens TextBlock content into ordinary text. Copy only that
+  // missing structural distinction from the official AST onto the matching
+  // full-parse content item, leaving the rest of the parsed recipe untouched.
   const sections = recipe?.sections || [];
-  const result = sections.map(section => (section.content || []).map(() => false));
   let sectionIndex = 0;
   let contentIndex = 0;
   let hasSection = false;
@@ -136,14 +139,11 @@ function textBlockMap(ast, recipe) {
     }
 
     if (type !== 'Step' && type !== 'TextBlock') continue;
-    if (result[sectionIndex] && contentIndex < result[sectionIndex].length) {
-      result[sectionIndex][contentIndex] = type === 'TextBlock';
-    }
+    const content = sections[sectionIndex]?.content?.[contentIndex];
+    if (type === 'TextBlock' && content) content.type = 'textBlock';
     contentIndex += 1;
     hasContentInCurrentSection = true;
   }
-
-  return result;
 }
 
 function recipeDisplayHelpers(parsed) {
@@ -332,12 +332,12 @@ function parseRecipeSource(recipePath, source, scale = 1) {
   }
 
   const syntaxAst = parseOfficialAst(source);
+  annotateTextBlocksFromAst(syntaxAst, payload.recipe);
 
   const recipe = {
     ...payload,
     display: recipeDisplayHelpers(parsed),
     syntax_ast: syntaxAst,
-    text_blocks: textBlockMap(syntaxAst, payload.recipe),
     id: relativeId,
     source,
     source_name: path.basename(recipePath),
@@ -458,10 +458,9 @@ function listRecipes() {
     const metadata = recipeMetadata(recipe);
     const title = normal(metadata.title || recipeDisplayName(recipe.id)) || 'Untitled recipe';
     const tags = (metadata.tags || []).map(normal).filter(Boolean);
-    const stepCount = ast.sections.reduce((count, section, sectionIndex) => count
-      + section.content.filter((content, contentIndex) => content.type === 'step'
-        || content.type === 'text' && content.value.trim()
-          && !recipe.text_blocks?.[sectionIndex]?.[contentIndex]).length, 0);
+    const stepCount = ast.sections.reduce((count, section) => count
+      + section.content.filter(content => content.type === 'step'
+        || content.type === 'text' && content.value.trim()).length, 0);
     return {
       id: recipe.id,
       title,

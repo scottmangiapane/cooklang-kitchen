@@ -14,7 +14,7 @@
 
 ## Parsing and rendering
 
-Cooklang syntax is parsed by the official `@cooklang/cooklang` WASM bindings to `cooklang-rs`. The viewer uses the full parsed recipe returned by `Parser.parse()` for sections, components, quantities, metadata, and scaling. It also asks `Parser.parse_ast()` for the official source-structure AST because the full recipe model intentionally represents both plain text and note blocks as text content. The AST is used only to preserve the parser's `TextBlock` distinction for note styling; there is no second Cooklang parser in the application.
+Cooklang syntax is parsed by the official `@cooklang/cooklang` WASM bindings to `cooklang-rs`. The viewer uses the full parsed recipe returned by `Parser.parse()` for sections, components, quantities, metadata, and scaling. It also asks `Parser.parse_ast()` for the official source-structure AST because the full recipe model currently represents both plain text and note blocks as text content. The server uses the AST only to annotate the corresponding full-parse content items as `textBlock`, so the UI can consume one unified section/content structure. Cooklang syntax is never parsed by application-specific rules.
 
 Standard metadata is read from the parser's `raw_metadata` map and interpreted metadata fields, so custom keys and standard fields such as `source`, `prep time`, `cook time`, and `servings` can all reach the UI. The displayed metadata table omits values already surfaced elsewhere on the page.
 
