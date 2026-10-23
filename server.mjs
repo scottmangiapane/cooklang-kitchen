@@ -30,7 +30,7 @@ const IMAGE_CACHE_DIR = path.resolve(process.env.IMAGE_CACHE_DIR || '/image-cach
 const RECIPE_CACHE_DIR = path.resolve(process.env.RECIPE_CACHE_DIR || '/recipe-cache');
 const PORT = 8080;
 const RECIPE_SUFFIXES = ['.cook', '.txt'];
-const RECIPE_CACHE_VERSION = 9;
+const RECIPE_CACHE_VERSION = 10;
 const IMAGE_SIZES = { card: { width: 800, height: 560 }, detail: { width: 1440, height: 1200 } };
 const IMAGE_MIMES = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
@@ -65,42 +65,46 @@ function recipeAst(recipe) {
   return recipe?.recipe;
 }
 
+const STANDARD_METADATA_FIELDS = [
+  ['title', 'title'],
+  ['description', 'description', ['introduction']],
+  ['tags', 'tags', ['tag']],
+  ['author', 'author'],
+  ['source', 'source'],
+  ['course', 'course', ['category']],
+  ['servings', 'servings', ['serves', 'yield']],
+  ['difficulty', 'difficulty'],
+  ['cuisine', 'cuisine'],
+  ['diet', 'diet'],
+  ['image', 'images', ['images', 'photo', 'picture', 'pictures']],
+  ['locale', 'locale'],
+];
+
 function recipeMetadata(recipe) {
-  if (recipe?.display_metadata) return recipe.display_metadata;
-
-  // The JS bindings expose `recipe.raw_metadata` as the Metadata wrapper,
-  // with its original key/value pairs in `.map`. Older API shapes are kept
-  // only as compatibility fallbacks.
-  const rawMetadata = recipe?.recipe?.raw_metadata;
-  const raw = toJsonValue(rawMetadata?.map ?? rawMetadata ?? recipe?.recipe?.metadata?.map ?? {});
-  const interpreted = toJsonValue(recipe?.metadata || {});
-  const metadata = { ...raw, ...(interpreted.custom || {}) };
-
-  // Prefer the parser's interpreted standard fields where useful, while
-  // retaining custom and standard keys exactly as written in the raw map.
-  const standardFields = [
-    ['title', interpreted.title, []],
-    ['description', interpreted.description, ['introduction']],
-    ['tags', interpreted.tags, ['tag']],
-    ['author', interpreted.author, []],
-    ['source', interpreted.source, []],
-    ['course', interpreted.course, ['category']],
-    ['servings', interpreted.servings, ['serves', 'yield']],
-    ['difficulty', interpreted.difficulty, []],
-    ['cuisine', interpreted.cuisine, []],
-    ['diet', interpreted.diet, []],
-    ['image', interpreted.images, ['images', 'picture', 'pictures']],
-    ['locale', interpreted.locale, []],
-  ];
-  for (const [key, value, aliases] of standardFields) {
-    if (value !== undefined && value !== null) metadata[key] = value;
-    if (value !== undefined && value !== null) {
-      for (const alias of aliases) delete metadata[alias];
-    }
+  if (recipe?.display_metadata && typeof recipe.display_metadata === 'object') {
+    return recipe.display_metadata;
   }
 
-  // Keep the source's human-readable time values (e.g. "20 minutes") rather
-  // than replacing them with the parser's interpreted minute-count object.
+  // Preserve arbitrary source metadata, then prefer the parser's interpreted
+  // values for standard fields. Custom metadata remains open-ended.
+  const raw = toJsonValue(recipe?.recipe?.raw_metadata?.map ?? {});
+  const interpreted = toJsonValue(recipe?.metadata ?? {}) ?? {};
+  const custom = interpreted.custom && typeof interpreted.custom === 'object'
+    ? interpreted.custom
+    : {};
+  const metadata = {
+    ...(raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}),
+    ...custom,
+  };
+
+  for (const [key, field, aliases = []] of STANDARD_METADATA_FIELDS) {
+    const value = interpreted[field];
+    if (value === undefined || value === null) continue;
+    metadata[key] = value;
+    for (const alias of aliases) delete metadata[alias];
+  }
+
+  // Keep source-formatted time values (e.g. "20 minutes") from raw metadata.
   return metadata;
 }
 
@@ -154,7 +158,6 @@ function recipeDisplayHelpers(parsed) {
     ingredientOptional: ast.ingredients.map(ingredient_is_optional),
     ingredientQuantities: ast.ingredients.map(ingredient => ingredient.quantity ? quantity_display(ingredient.quantity) : ''),
     cookwareNames: ast.cookware.map(cookware_display_name),
-    cookwareListed: ast.cookware.map(cookware_should_be_listed),
     cookwareOptional: ast.cookware.map(cookware_is_optional),
     timerQuantities: ast.timers.map(timer => timer.quantity ? quantity_display(timer.quantity) : ''),
     inlineQuantities: ast.inline_quantities.map(quantity_display),
@@ -203,7 +206,7 @@ function safeExistingPath(candidate) {
 }
 
 function recipePhotoPath(recipePath, metadata = {}) {
-  const imageValues = ['image', 'images', 'picture', 'pictures']
+  const imageValues = ['photo', 'image', 'images', 'picture', 'pictures']
     .flatMap(key => Array.isArray(metadata?.[key]) ? metadata[key] : [metadata?.[key]]);
   for (const value of imageValues) {
     if (typeof value !== 'string' || !value.trim() || path.isAbsolute(value.trim())) continue;

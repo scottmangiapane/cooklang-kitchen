@@ -8,7 +8,7 @@ let originalServingLabel = '';
 let checkedIngredients = new Set();
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const prettyKey = k => String(k).replace(/[_-]+/g,' ').replace(/\b\w/g, c=>c.toUpperCase());
+const prettyKey = k => String(k).replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/[_-]+/g,' ').replace(/\s+/g,' ').trim().replace(/\b\w/g, c=>c.toUpperCase());
 const human = v => {
   if (Array.isArray(v)) return v.map(human).filter(Boolean).join(', ');
   if (v && typeof v === 'object') {
@@ -66,86 +66,81 @@ function renderHome(query='', directoryOk=true){
 }
 
 function recipeAst(recipe){return recipe.recipe;}
+const HIDDEN_METADATA_KEYS = new Set(['title','tags','servings','serves','yield']);
+const PHOTO_METADATA_KEYS = new Set(['photo','image','images','picture','pictures']);
+const normalizedMetadataKey = key => String(key).trim().toLowerCase().replace(/[_-]+/g,' ');
+
+// Metadata normalization is owned by the server; the browser only renders it.
 function recipeMetadata(recipe){
-  if(recipe.display_metadata&&typeof recipe.display_metadata==='object')return recipe.display_metadata;
-  const rawMetadata=recipe.recipe?.raw_metadata;
-  const raw=rawMetadata?.map || rawMetadata || recipe.recipe?.metadata?.map || {};
-  const interpreted=recipe.metadata;
-  return {
-    ...raw,
-    ...interpreted.custom,
-    ...(interpreted.title!==undefined?{title:interpreted.title}:{}),
-    ...(interpreted.description!==undefined?{description:interpreted.description}:{}),
-    ...(interpreted.tags!==undefined?{tags:interpreted.tags}:{}),
-    ...(interpreted.servings!==undefined?{servings:interpreted.servings}:{}),
-  };
+  return recipe.display_metadata && typeof recipe.display_metadata === 'object'
+    ? recipe.display_metadata
+    : {};
 }
-function recipeTags(meta){return (meta.tags||[]).map(tag=>tag.trim()).filter(Boolean);}
+function recipeTags(meta){
+  const tags = Array.isArray(meta.tags) ? meta.tags : meta.tags == null ? [] : [meta.tags];
+  return tags.map(tag=>String(tag).trim()).filter(Boolean);
+}
 function metadataCards(meta,photoAvailable=false){
-  const hidden=new Set(['title','tags','servings','serves','yield']);
-  if(photoAvailable)for(const key of ['image','images','picture','pictures'])hidden.add(key);
-  const items=Object.entries(meta).filter(([key,value])=>!hidden.has(key.toLowerCase().replace(/[_-]+/g,' '))&&value!==undefined&&value!==null&&human(value).trim());
+  const items=Object.entries(meta).map(([key,value])=>({key:prettyKey(key),value:human(value),normalizedKey:normalizedMetadataKey(key)}))
+    .filter(item=>!HIDDEN_METADATA_KEYS.has(item.normalizedKey)
+      && !(photoAvailable&&PHOTO_METADATA_KEYS.has(item.normalizedKey))
+      && item.value.trim());
   if(!items.length)return '';
-  return `<div class="metadata-table">${items.map(([key,value])=>`<div class="metadata-item"><span class="metadata-key">${esc(prettyKey(key))}</span><div class="metadata-value">${esc(human(value))}</div></div>`).join('')}</div>`;
+  return `<div class="metadata-table">${items.map(({key,value})=>`<div class="metadata-item"><span class="metadata-key">${esc(key)}</span><div class="metadata-value">${esc(value)}</div></div>`).join('')}</div>`;
 }
 function astSections(ast){return ast.sections;}
 function contentItems(content){return content.value.items;}
-function quantityText(text){return String(text||'').replace(/\s*°?([FC])$/i,'°$1');}
-function mergeSidebarComponents(items,{includePreparation=false,countUnquantified=false}={}){
-  const totals=new Map();
-  for(const item of items){
-    // Unquantified cookware entries each represent one piece of equipment.
-    // Treat those as a count of one so repeated items (e.g. three #bowl
-    // references) can be consolidated just like explicitly quantified items.
-    const sourceAmount=String(item.quantity??'').trim();
-    const amount=countUnquantified&&!sourceAmount?'1':sourceAmount;
-    const match=amount.match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(.*?)$/);
-    const key=[item.name.toLocaleLowerCase(),item.optional,includePreparation?(item.preparation||'').toLocaleLowerCase():'',match?match[2].trim().toLocaleLowerCase():amount.toLocaleLowerCase()].join('\u0000');
-    const existing=totals.get(key);
-    if(existing&&match){
-      const previous=String(existing.quantity??'').match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(.*?)$/);
-      if(previous){
-        const sum=Number(previous[1])+Number(match[1]);
-        existing.quantity=`${Number(sum.toFixed(6))}${match[2]?' '+match[2].trim():''}`;
-        continue;
-      }
-    }
-    if(!existing)totals.set(key,{...item,quantity:amount});
-    else totals.set(`${key}\u0000${item.index}`,{...item,quantity:amount});
-  }
-  return [...totals.values()];
-}
 function sidebarIngredients(recipe){
   const ast=recipeAst(recipe),display=recipe.display;
-  const items=display.groupedIngredients.map(({index,quantity})=>({
-    index,
-    name:display.ingredientNames[index],
-    optional:display.ingredientOptional[index],
-    preparation:ast.ingredients[index].note||'',
-    quantity,
-  }));
-  return mergeSidebarComponents(items,{includePreparation:true});
+  const groupedByIndex=new Map(display.groupedIngredients.map(item=>[item.index,item]));
+  // Grouped quantities include all references, so show each ingredient once at its first use.
+  const assigned=new Set();
+  return ast.sections.map(section=>{
+    const items=[];
+    for(const content of section.content){
+      const references=content.value?.items;
+      if(!Array.isArray(references))continue;
+      for(const reference of references){
+        const index=reference.index;
+        if(reference.type!=='ingredient'||assigned.has(index)||!display.ingredientListed[index])continue;
+        const grouped=groupedByIndex.get(index);
+        if(!grouped)continue;
+        assigned.add(index);
+        items.push({
+          index,
+          name:display.ingredientNames[index],
+          optional:display.ingredientOptional[index],
+          preparation:ast.ingredients[index].note||'',
+          quantity:grouped.quantity,
+        });
+      }
+    }
+    return {name:section.name||'',items};
+  }).filter(section=>section.items.length);
 }
 function sidebarCookware(recipe){
   const display=recipe.display;
-  const items=display.groupedCookware.filter(({index})=>display.cookwareListed[index]).map(({index,quantity})=>({
+  return display.groupedCookware.map(({index,quantity})=>({
     index,
     name:display.cookwareNames[index],
     optional:display.cookwareOptional[index],
     quantity,
   }));
-  return mergeSidebarComponents(items,{countUnquantified:true});
 }
-function renderComponents(items,type){
+function renderComponents(items,type,idPrefix=''){
   if(!items.length)return `<p class="empty-list">${type==='ingredient'?'No ingredients found in the markup.':'No cookware marked in this recipe.'}</p>`;
-  if(type==='ingredient')return `<ul class="ingredient-list">${items.map((item,index)=>{
-    const amount=quantityText(item.quantity);
-    return `<li><input class="ingredient-check" type="checkbox" id="ing-${index}" data-ingredient-index="${index}" ${checkedIngredients.has(index)?'checked':''}><label for="ing-${index}" style="flex:1"><span class="ingredient-main">${amount?`<span class="ingredient-amount">${esc(amount)}</span>`:''}<span class="ingredient-name">${esc(item.name)}</span>${item.optional?'<span class="optional">optional</span>':''}</span>${item.preparation?`<span class="ingredient-prep">${esc(item.preparation)}</span>`:''}</label></li>`;
+  if(type==='ingredient')return `<ul class="ingredient-list">${items.map(item=>{
+    const amount=item.quantity??'',id=`ing-${idPrefix}-${item.index}`;
+    return `<li><input class="ingredient-check" type="checkbox" id="${id}" data-ingredient-index="${item.index}" ${checkedIngredients.has(item.index)?'checked':''}><label class="ingredient-label" for="${id}"><span class="ingredient-main">${amount!==''?`<span class="ingredient-amount">${esc(amount)}</span>`:''}<span class="ingredient-name">${esc(item.name)}</span>${item.optional?'<span class="optional">optional</span>':''}</span>${item.preparation?`<span class="ingredient-prep">${esc(item.preparation)}</span>`:''}</label></li>`;
   }).join('')}</ul>`;
   return `<ul class="cookware-list">${items.map(item=>{
-    const amount=quantityText(item.quantity),count=Number(item.quantity);
-    return `<li>${icon('cookingPot')}<span>${amount!==''&&Number.isFinite(count)?`<span class="cookware-count">${esc(amount)}</span> `:''}${esc(item.name)}${item.optional?' <span class="optional">optional</span>':''}</span></li>`;
+    const amount=item.quantity??'';
+    return `<li>${icon('cookingPot')}<span>${amount!==''?`<span class="cookware-amount">${esc(amount)}</span> `:''}${esc(item.name)}${item.optional?' <span class="optional">optional</span>':''}</span></li>`;
   }).join('')}</ul>`;
+}
+function renderIngredientSections(sections){
+  if(!sections.length)return renderComponents([],'ingredient');
+  return sections.map((section,index)=>`<div class="ingredient-group">${section.name?`<h3 class="ingredient-section-heading">${esc(section.name)}</h3>`:''}${renderComponents(section.items,'ingredient',index)}</div>`).join('');
 }
 function ingredientTagMarkup(recipe,content){
   const ast=recipeAst(recipe),display=recipe.display;
@@ -153,7 +148,7 @@ function ingredientTagMarkup(recipe,content){
     .map(reference=>({reference,ingredient:ast.ingredients[reference.index]}));
   if(!mentions.length)return '';
   return `<div class="step-ingredients" aria-label="Ingredients used in this step">${mentions.map(({reference,ingredient})=>{
-    const amount=quantityText(display.ingredientQuantities[reference.index]);
+    const amount=display.ingredientQuantities[reference.index]??'';
     return `<span class="step-ingredient-tag">${amount?`<b>${esc(amount)}</b> `:''}${esc(display.ingredientNames[reference.index])}${ingredient.note?` <span class="step-tag-prep">· ${esc(ingredient.note)}</span>`:''}${display.ingredientOptional[reference.index]?' <em>optional</em>':''}</span>`;
   }).join('')}</div>`;
 }
@@ -171,9 +166,9 @@ function inlineItemMarkup(recipe,item){
   }
   if(item.type==='timer'){
     const timer=ast.timers[item.index];
-    return `<span class="inline-timer">${icon('clock')} ${esc([timer.name,quantityText(display.timerQuantities[item.index])].filter(Boolean).join(' '))}</span>`;
+    return `<span class="inline-timer">${icon('clock')} ${esc([timer.name,display.timerQuantities[item.index]].filter(Boolean).join(' '))}</span>`;
   }
-  if(item.type==='inlineQuantity')return esc(quantityText(display.inlineQuantities[item.index]));
+  if(item.type==='inlineQuantity')return esc(display.inlineQuantities[item.index]);
   return '';
 }
 function stepItemsMarkup(recipe,items){return items.map(item=>inlineItemMarkup(recipe,item)).join('');}
@@ -223,7 +218,7 @@ function renderRecipe(recipe=currentRecipe,reset=false){
   if(recipe.parser_error){app.innerHTML=`<div class="error-banner">This recipe could not be parsed: ${esc(recipe.parser_error)}</div><details class="raw-toggle" open><summary>View original Cooklang source</summary><pre>${esc(recipe.source||'')}</pre></details>`;return;}
   const ast=recipeAst(recipe),meta=recipeMetadata(recipe);
   if(reset){servingStateFor(meta);checkedIngredients=new Set();}
-  const ingredients=sidebarIngredients(recipe),cookware=sidebarCookware(recipe);
+  const ingredientSections=sidebarIngredients(recipe),ingredients=ingredientSections.flatMap(section=>section.items),ingredientCount=ingredients.length,cookware=sidebarCookware(recipe);
   const title=String(meta.title||recipe.id.replace(/\.cook(?:\.txt)?$|\.txt$/i,'').replace(/[_-]/g,' ')||'Untitled recipe');
   const tags=recipeTags(meta),photo=recipe.photo_available?`<img class="recipe-photo" src="${esc(photoUrl(recipe.id,'detail',recipe.photo_version))}" alt="${esc(title)}" onerror="this.remove();this.parentElement.classList.add('photo-missing')">`:'';
   let stepNumber=0,currentSection='',stepsMarkup='';
@@ -260,8 +255,8 @@ function renderRecipe(recipe=currentRecipe,reset=false){
   }
   const tagsMarkup=tags.length?`<div class="recipe-tags">${tagMarkup(tags)}</div>`:'';
   app.innerHTML=`
-    <section class="recipe-header ${recipe.photo_available?'has-photo':''}"><div class="recipe-header-copy"><h1 class="recipe-title">${esc(title)}</h1>${tagsMarkup}<div class="recipe-deck"><span class="meta-pill">${icon('forkKnife')} <b>${ingredients.length}</b> ingredients</span><span class="meta-pill">${icon('list')} <b>${stepNumber}</b> steps</span></div>${metadataCards(meta,recipe.photo_available)}</div>${photo?`<div class="recipe-photo-frame">${photo}</div>`:''}</section>
-    <div class="detail-layout"><aside class="ingredients-column"><section class="side-section"><div class="serving-row">${renderServingControl()}</div><h2 class="section-heading">Ingredients <span>(${ingredients.length})</span></h2>${renderComponents(ingredients,'ingredient')}</section><section class="side-section"><h2 class="section-heading">${icon('cookingPot')} Cookware</h2>${renderComponents(cookware,'cookware')}</section></aside><section class="instructions"><h2 class="section-heading instruction-heading">${icon('list')} Method</h2>${stepsMarkup||'<p class="empty-list">No instruction steps were detected. The original file is available below.</p>'}</section></div>
+    <section class="recipe-header ${recipe.photo_available?'has-photo':''}"><div class="recipe-header-copy"><h1 class="recipe-title">${esc(title)}</h1>${tagsMarkup}<div class="recipe-deck"><span class="meta-pill">${icon('forkKnife')} <b>${ingredientCount}</b> ingredients</span><span class="meta-pill">${icon('list')} <b>${stepNumber}</b> steps</span></div>${metadataCards(meta,recipe.photo_available)}</div>${photo?`<div class="recipe-photo-frame">${photo}</div>`:''}</section>
+    <div class="detail-layout"><aside class="ingredients-column"><section class="side-section"><div class="serving-row">${renderServingControl()}</div><h2 class="section-heading">Ingredients <span>(${ingredientCount})</span></h2>${renderIngredientSections(ingredientSections)}</section><section class="side-section"><h2 class="section-heading">${icon('cookingPot')} Cookware</h2>${renderComponents(cookware,'cookware')}</section></aside><section class="instructions"><h2 class="section-heading instruction-heading">${icon('list')} Method</h2>${stepsMarkup||'<p class="empty-list">No instruction steps were detected. The original file is available below.</p>'}</section></div>
     <details class="raw-toggle"><summary>View original Cooklang source</summary><pre id="raw-source"></pre></details>`;
   document.getElementById('raw-source').textContent=recipe.source;
   document.querySelectorAll('.ingredient-check').forEach(input=>input.addEventListener('change',event=>{const index=Number(event.currentTarget.dataset.ingredientIndex);if(event.currentTarget.checked)checkedIngredients.add(index);else checkedIngredients.delete(index);}));

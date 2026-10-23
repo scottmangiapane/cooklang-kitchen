@@ -473,6 +473,23 @@ body {
   list-style: none;
 }
 
+.ingredient-label {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.ingredient-section-heading {
+  margin: 18px 0 4px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ingredient-group:first-child .ingredient-section-heading {
+  margin-top: 0;
+}
+
 .cookware-list {
   margin: 0;
   padding: 0;
@@ -559,12 +576,7 @@ body {
   gap: 9px;
 }
 
-.cookware-list li:before {
-  content: none;
-  color: #9aa895;
-}
-
-.cookware-count {
+.cookware-amount {
   color: var(--green);
   font-weight: 700;
   font-variant-numeric: tabular-nums;

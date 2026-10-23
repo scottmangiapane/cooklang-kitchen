@@ -9,14 +9,14 @@
 - Browse and search a personal recipe collection, with optional recipe photos and tags.
 - Read Cooklang instructions with linked ingredients, cookware, and timers.
 - View official Cooklang notes, sections, and recipe front matter.
-- Scale ingredient quantities with the serving controls, including the instruction-step ingredient tags and consolidated sidebar list.
+- Scale ingredient quantities with the serving controls, including instruction-step tags and section-grouped sidebar ingredients.
 - Cache recipe data and optimized photos for faster browsing.
 
 ## Parsing and rendering
 
 Cooklang syntax is parsed by the official `@cooklang/cooklang` WASM bindings to `cooklang-rs`. The viewer uses the full parsed recipe returned by `Parser.parse()` for sections, components, quantities, metadata, and scaling. It also asks `Parser.parse_ast()` for the official source-structure AST because the full recipe model currently represents both plain text and note blocks as text content. The server uses the AST only to annotate the corresponding full-parse content items as `textBlock`, so the UI can consume one unified section/content structure. Cooklang syntax is never parsed by application-specific rules.
 
-Standard metadata is read from the parser's `raw_metadata` map and interpreted metadata fields, so custom keys and standard fields such as `source`, `prep time`, `cook time`, and `servings` can all reach the UI. The displayed metadata table omits values already surfaced elsewhere on the page.
+Metadata is assembled once on the server from the parser's raw metadata map and interpreted standard fields. Arbitrary custom key/value pairs are supported; there is no frontend allowlist. The metadata table omits fields already represented elsewhere on the page (title, tags, and servings aliases), and hides photo-path metadata when a recipe photo is actually displayed. Time values stay in their source-readable form rather than being reinterpreted for display.
 
 ## Screenshots
 
@@ -55,6 +55,6 @@ docker compose down
 
 ## Recipes and photos
 
-The app supports Cooklang recipes with YAML front matter, sections, notes, ingredients, cookware, and timers. Photos are optional: put an image beside a recipe with the same base name, or set `photo:`/`image:` to a relative path in front matter. JPG, PNG, WebP, AVIF, and GIF are supported.
+The app supports Cooklang recipes with YAML front matter, sections, notes, ingredients, cookware, and timers. Photos are optional: put an image beside a recipe with the same base name, or set `photo:`, `image:`, `images:`, `picture:`, or `pictures:` to a relative path in front matter. JPG, PNG, WebP, AVIF, and GIF are supported.
 
 On a recipe page, use the serving controls to scale ingredient quantities. Press `/` to focus search, or `Escape` to clear it.
