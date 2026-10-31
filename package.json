@@ -4,7 +4,8 @@
   "type": "module",
   "description": "A lightweight, self-hosted browser for Cooklang recipes.",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "@cooklang/cooklang": "0.19.1",

@@ -24,6 +24,13 @@ function photoUrl(id, size='detail', version=''){
   if(version) query.set('v', version);
   return '/api/photos/' + id.split('/').map(encodeURIComponent).join('/') + '?' + query.toString();
 }
+async function readApiJson(response, fallbackMessage){
+  let data=null;
+  try{data=await response.json();}catch{/* A non-JSON error response is handled below. */}
+  if(!response.ok)throw new Error(response.status===404?fallbackMessage:(data?.error||fallbackMessage));
+  if(!data||typeof data!=='object')throw new Error('The server returned an invalid response.');
+  return data;
+}
 function tagMarkup(tags, limit=Infinity){ const all=tags||[]; const shown=all.slice(0,limit); const hidden=Math.max(0,all.length-shown.length); return shown.map(t=>`<span class="tag">${icon('tag','tag-icon')}${esc(t)}</span>`).join('')+(hidden?`<span class="tag tag-overflow" title="${hidden} more tags" aria-label="${hidden} more tags">+${hidden}</span>`:''); }
 function goHome(){ if(location.hash !== '#/') location.hash = '/'; else loadIndex(); }
 
@@ -53,7 +60,7 @@ function renderHome(query='', directoryOk=true){
     <div class="toolbar"><span class="results-label" id="results-count">${recipes.length} ${recipes.length===1?'recipe':'recipes'}${q?' found':''}</span><label class="sort-label">Sort by <select id="sort-order" class="sort-select" aria-label="Sort recipes"><option value="title" ${sort==='title'?'selected':''}>Name</option><option value="filename" ${sort==='filename'?'selected':''}>File name</option></select></label></div>
     ${recipes.length?`<div class="recipe-grid">${recipes.map((r,i)=>{
       const photo = r.photo_available ? `<img class="card-photo" src="${esc(photoUrl(r.id,'card',r.photo_version))}" alt="" loading="lazy" decoding="async" onerror="this.remove();this.parentElement.classList.add('photo-missing')">` : '';
-      return `<a class="recipe-card ${r.photo_available?'has-photo':''}" href="${recipeUrl(r.id)}"><div class="card-top ${r.photo_available?'with-photo':''}">${r.photo_available?photo:`<span class="card-icon">${icon('bookOpen')}</span>`}<span class="card-number">${String(i+1).padStart(2,'0')}</span></div><h2 class="card-title">${esc(r.title)}</h2><div class="tag-row">${tagMarkup(r.tags,6)}</div><div class="card-footer"><span>${icon('forkKnife')} ${r.ingredient_count||0} ingredients</span><span>${icon('list')} ${r.step_count||0} steps</span></div></a>`;
+      return `<a class="recipe-card ${r.photo_available?'has-photo':''}" href="${recipeUrl(r.url_id)}"><div class="card-top ${r.photo_available?'with-photo':''}">${r.photo_available?photo:`<span class="card-icon">${icon('bookOpen')}</span>`}<span class="card-number">${String(i+1).padStart(2,'0')}</span></div><h2 class="card-title">${esc(r.title)}</h2><div class="tag-row">${tagMarkup(r.tags,6)}</div><div class="card-footer"><span>${icon('forkKnife')} ${r.ingredient_count||0} ingredients</span><span>${icon('list')} ${r.step_count||0} steps</span></div></a>`;
     }).join('')}</div>`:`<div class="empty"><strong>${recipeCache.length?'No matching recipes':'No recipes found'}</strong><span>${recipeCache.length?'Try another name or tag.':'Add .cook or .txt recipe files to the mounted Recipes folder.'}</span></div>`}
   `;
   const input=document.getElementById('recipe-search');
@@ -208,7 +215,7 @@ function servingStateFor(meta){
 function scaleFactor(){return selectedServings/Math.max(1,baseServings);}
 async function loadRecipe(id){
   app.innerHTML='<div class="loading"><span class="spinner"></span> Loading recipe…</div>';
-  try{const response=await fetch('/api/recipes/'+id.split('/').map(encodeURIComponent).join('/'),{cache:'no-store'});const data=await response.json();if(!response.ok)throw new Error(data.error||'Recipe not found');renderRecipe(data,true);}
+  try{const response=await fetch('/api/recipes/'+id.split('/').map(encodeURIComponent).join('/'),{cache:'no-store'});const data=await readApiJson(response,'Recipe not found.');renderRecipe(data,true);}
   catch(e){app.innerHTML=`<div class="error-banner">Couldn't open this recipe. ${esc(e.message)}</div><button class="retry-button" id="retry-connection" type="button">Try again</button>`;document.getElementById('retry-connection')?.addEventListener('click',()=>loadRecipe(id));}
 }
 function renderRecipe(recipe=currentRecipe,reset=false){
@@ -266,13 +273,12 @@ function renderRecipe(recipe=currentRecipe,reset=false){
 async function changeServings(delta){
   const target=selectedServings+delta;
   if(target<1||target>100||!currentRecipe)return;
-  const id=currentRecipe.id;
+  const id=currentRecipe.url_id;
   selectedServings=target;
   try{
     const endpoint='/api/recipes/'+id.split('/').map(encodeURIComponent).join('/')+'?scale='+encodeURIComponent(scaleFactor());
     const response=await fetch(endpoint,{cache:'no-store'});
-    const data=await response.json();
-    if(!response.ok)throw new Error(data.error||'Recipe not found');
+    const data=await readApiJson(response,'Could not load the recipe.');
     renderRecipe(data,false);
   }catch(error){
     selectedServings-=delta;

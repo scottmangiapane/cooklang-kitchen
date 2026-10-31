@@ -5,6 +5,8 @@ import path from 'node:path';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
+import { resolveExistingWithin, resolveRecipeId } from './path-security.mjs';
+import { firstRecipeByUrlId, recipeUrlId } from './recipe-urls.mjs';
 import {
   Parser,
   ingredient_display_name,
@@ -26,11 +28,16 @@ const resolveRoot = value => {
 };
 const ROOT = resolveRoot(process.env.RECIPES_DIR || '/recipes');
 const WEB = path.join(APP_DIR, 'static');
+const WEB_ROOT = resolveRoot(WEB);
 const IMAGE_CACHE_DIR = path.resolve(process.env.IMAGE_CACHE_DIR || '/image-cache');
 const RECIPE_CACHE_DIR = path.resolve(process.env.RECIPE_CACHE_DIR || '/recipe-cache');
 const PORT = 8080;
-const RECIPE_SUFFIXES = ['.cook', '.txt'];
-const RECIPE_CACHE_VERSION = 10;
+// Bound parsing and image work to files of a reasonable size. Override only for a trusted library.
+const MAX_RECIPE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+const MAX_IMAGE_PIXELS = 40_000_000;
+const RECIPE_SUFFIXES = ['.cook.txt', '.cook', '.txt'];
+const RECIPE_CACHE_VERSION = 11;
 const IMAGE_SIZES = { card: { width: 800, height: 560 }, detail: { width: 1440, height: 1200 } };
 const IMAGE_MIMES = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
@@ -42,6 +49,7 @@ const STATIC_MIMES = {
 };
 const parsedRecipes = new Map();
 const imageJobs = new Map();
+let recipeUrlLookup = null;
 const normal = value => String(value ?? '').replace(/\s+/g, ' ').trim();
 
 function hash(value, length = 32) {
@@ -183,25 +191,18 @@ function recipeDisplayName(recipePath) {
   return normal(recipeBaseName(recipePath).replace(/[_-]/g, ' '));
 }
 
+function safeExistingPath(candidate) {
+  return resolveExistingWithin(ROOT, candidate);
+}
+
 function isRecipeFile(recipePath) {
   try {
-    return fs.statSync(recipePath).isFile() && RECIPE_SUFFIXES.some(suffix => path.basename(recipePath).toLowerCase().endsWith(suffix));
+    const stat = fs.statSync(recipePath);
+    return stat.isFile()
+      && stat.size <= MAX_RECIPE_BYTES
+      && RECIPE_SUFFIXES.some(suffix => path.basename(recipePath).toLowerCase().endsWith(suffix));
   } catch {
     return false;
-  }
-}
-
-function isWithinRoot(candidate) {
-  const relative = path.relative(ROOT, candidate);
-  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
-}
-
-function safeExistingPath(candidate) {
-  try {
-    const resolved = fs.realpathSync(candidate);
-    return isWithinRoot(resolved) ? resolved : null;
-  } catch {
-    return null;
   }
 }
 
@@ -211,13 +212,23 @@ function recipePhotoPath(recipePath, metadata = {}) {
   for (const value of imageValues) {
     if (typeof value !== 'string' || !value.trim() || path.isAbsolute(value.trim())) continue;
     const found = safeExistingPath(path.resolve(path.dirname(recipePath), value.trim()));
-    if (found && IMAGE_MIMES[path.extname(found).toLowerCase()] && fs.statSync(found).isFile()) return found;
+    if (found && IMAGE_MIMES[path.extname(found).toLowerCase()]) {
+      try {
+        const stat = fs.statSync(found);
+        if (stat.isFile() && stat.size <= MAX_IMAGE_BYTES) return found;
+      } catch { /* Ignore photos that disappear or are unavailable. */ }
+    }
   }
 
   const base = recipeBaseName(recipePath);
   for (const suffix of Object.keys(IMAGE_MIMES)) {
     const found = safeExistingPath(path.join(path.dirname(recipePath), base + suffix));
-    if (found && fs.statSync(found).isFile()) return found;
+    if (found) {
+      try {
+        const stat = fs.statSync(found);
+        if (stat.isFile() && stat.size <= MAX_IMAGE_BYTES) return found;
+      } catch { /* Ignore photos that disappear or are unavailable. */ }
+    }
   }
   return null;
 }
@@ -271,7 +282,7 @@ async function optimizedPhoto(photoPath, requestedVariant) {
     try {
       fs.mkdirSync(IMAGE_CACHE_DIR, { recursive: true });
       const size = IMAGE_SIZES[variant];
-      const webp = await sharp(photoPath, { animated: false })
+      const webp = await sharp(photoPath, { animated: false, limitInputPixels: MAX_IMAGE_PIXELS })
         .rotate()
         .resize({ width: size.width, height: size.height, fit: 'inside', withoutEnlargement: true })
         .webp({ quality: variant === 'card' ? 86 : 84, effort: 5 })
@@ -342,6 +353,7 @@ function parseRecipeSource(recipePath, source, scale = 1) {
     display: recipeDisplayHelpers(parsed),
     syntax_ast: syntaxAst,
     id: relativeId,
+    url_id: recipeUrlId(relativeId),
     source,
     source_name: path.basename(recipePath),
   };
@@ -444,10 +456,16 @@ function loadRecipeLibrary() {
 }
 
 function listRecipes() {
-  return loadRecipeLibrary().map(recipe => {
+  const recipes = loadRecipeLibrary();
+  recipeUrlLookup = firstRecipeByUrlId(recipes.map(recipe => recipe.id));
+  const visibleRecipes = recipes.filter(recipe => recipeUrlLookup.get(recipeUrlId(recipe.id)) === recipe.id);
+
+  return visibleRecipes.map(recipe => {
+    const urlId = recipeUrlId(recipe.id);
     if (recipe.parser_error) {
       return {
         id: recipe.id,
+        url_id: urlId,
         title: recipeDisplayName(recipe.id) || 'Untitled recipe',
         tags: [],
         ingredient_count: 0,
@@ -466,6 +484,7 @@ function listRecipes() {
         || content.type === 'text' && content.value.trim()).length, 0);
     return {
       id: recipe.id,
+      url_id: urlId,
       title,
       tags,
       ingredient_count: recipe.display.groupedIngredients.length,
@@ -476,12 +495,22 @@ function listRecipes() {
   });
 }
 
-function recipePathFromId(id) {
-  if (!id || id.includes('\0') || !RECIPE_SUFFIXES.some(suffix => id.toLowerCase().endsWith(suffix))) return null;
-  const candidate = path.resolve(ROOT, id);
-  if (!isWithinRoot(candidate)) return null;
-  const safe = safeExistingPath(candidate);
-  return safe && isRecipeFile(safe) ? safe : null;
+function recipePathFromFileId(id) {
+  return resolveRecipeId(ROOT, id, RECIPE_SUFFIXES, MAX_RECIPE_BYTES);
+}
+
+function recipePathFromUrlId(id) {
+  if (typeof id !== 'string' || !id || id.includes('\0')) return null;
+
+  // Build this lookup once, or refresh it when the recipe index is requested.
+  // Only IDs from the recipe inventory can be selected; the shared resolver
+  // then rechecks containment and symlinks before any file is read.
+  if (!recipeUrlLookup) {
+    const fileIds = recipeInventory().map(([recipePath]) => path.relative(ROOT, recipePath).split(path.sep).join('/'));
+    recipeUrlLookup = firstRecipeByUrlId(fileIds);
+  }
+  const fileId = recipeUrlLookup.get(id);
+  return fileId ? recipePathFromFileId(fileId) : null;
 }
 
 function send(res, data, contentType, status = 200, cacheControl = 'no-store') {
@@ -522,7 +551,7 @@ async function handleRequest(req, res) {
   }
 
   if (pathname.startsWith('/api/photos/')) {
-    const recipePath = recipePathFromId(pathname.slice('/api/photos/'.length));
+    const recipePath = recipePathFromFileId(pathname.slice('/api/photos/'.length));
     if (!recipePath) { send(res, 'Photo not found', 'text/plain; charset=utf-8', 404); return; }
     try {
       const recipe = parseRecipe(recipePath);
@@ -543,7 +572,7 @@ async function handleRequest(req, res) {
       sendJson(res, { error: 'Scale must be a number greater than 0 and at most 100.' }, 400);
       return;
     }
-    const recipePath = recipePathFromId(id);
+    const recipePath = recipePathFromUrlId(id);
     if (!recipePath) { sendJson(res, { error: 'Recipe not found.' }, 404); return; }
     try {
       sendJson(res, parseRecipe(recipePath, scale));
@@ -569,25 +598,28 @@ async function handleRequest(req, res) {
   }
 
   if (pathname.startsWith('/static/')) {
-    let candidate;
-    try { candidate = fs.realpathSync(path.resolve(WEB, pathname.slice('/static/'.length))); }
-    catch { send(res, 'Not found', 'text/plain; charset=utf-8', 404); return; }
-    const relative = path.relative(fs.realpathSync(WEB), candidate);
-    if (relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative) || !fs.statSync(candidate).isFile()) {
-      send(res, 'Not found', 'text/plain; charset=utf-8', 404);
-      return;
-    }
+    const requestedAsset = path.resolve(WEB_ROOT, pathname.slice('/static/'.length));
+    const candidate = resolveExistingWithin(WEB_ROOT, requestedAsset);
+    if (!candidate) { send(res, 'Not found', 'text/plain; charset=utf-8', 404); return; }
+    try {
+      if (!fs.statSync(candidate).isFile()) { send(res, 'Not found', 'text/plain; charset=utf-8', 404); return; }
+    } catch { send(res, 'Not found', 'text/plain; charset=utf-8', 404); return; }
     const contentType = STATIC_MIMES[path.extname(candidate).toLowerCase()] || 'application/octet-stream';
     const cache = ['app.js', 'style.css', 'icons.js'].includes(path.basename(candidate)) ? 'no-cache' : 'public, max-age=3600';
     send(res, fs.readFileSync(candidate), contentType, 200, cache);
     return;
   }
 
+  if (pathname.startsWith('/api/')) {
+    sendJson(res, { error: 'Not found.' }, 404);
+    return;
+  }
   send(res, 'Not found', 'text/plain; charset=utf-8', 404);
 }
 
 const server = createServer((req, res) => {
   handleRequest(req, res).catch(error => {
+    // Keep stack traces in the container logs; don't reflect internal details to clients.
     console.error(`Request failed: ${error?.stack || error}`);
     if (!res.headersSent) send(res, 'Internal server error', 'text/plain; charset=utf-8', 500);
     else res.destroy();

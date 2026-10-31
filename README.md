@@ -10,6 +10,7 @@
 - Read Cooklang instructions with linked ingredients, cookware, and timers.
 - View official Cooklang notes, sections, and recipe front matter.
 - Scale ingredient quantities with the serving controls, including instruction-step tags and section-grouped sidebar ingredients.
+- Use clean, extensionless recipe URLs while keeping the original recipe filenames unchanged.
 - Cache recipe data and optimized photos for faster browsing.
 
 ## Parsing and rendering
@@ -34,7 +35,7 @@ Metadata is assembled once on the server from the parser's raw metadata map and 
 
 3. Open <http://127.0.0.1:8080>.
 
-The app listens on port `8080` inside the container. Compose publishes it on the host's loopback interface by default. Recipes are mounted read-only.
+The app uses Node.js's built-in HTTP server and listens on port `8080` inside the container. Compose publishes it on the host's loopback interface by default. Recipes are mounted read-only, and the app runs as the unprivileged Node user.
 
 ## Configure deployment
 
@@ -46,6 +47,8 @@ cp compose.override.yaml.example compose.override.yaml
 
 The example publishes on <http://127.0.0.1:3000>. You can also change the recipe mount, image-cache and recipe-cache mounts, or container user in the override. The `!override` port syntax requires Docker Compose v2.24.4 or later.
 
+**Security note:** this application has no user authentication; anyone who can reach it can browse and download the configured recipe library and its photos. Keep the port bound to loopback unless network exposure is intentional. When exposing it through a reverse proxy or to a LAN/Internet, require authentication at that boundary and use TLS. Do not publish the container port directly to an untrusted network. The server only serves recipe and photo files from the configured recipe directory; keep that directory limited to content you intend to publish.
+
 Useful commands:
 
 ```sh
@@ -55,6 +58,8 @@ docker compose down
 
 ## Recipes and photos
 
-The app supports Cooklang recipes with YAML front matter, sections, notes, ingredients, cookware, and timers. Photos are optional: put an image beside a recipe with the same base name, or set `photo:`, `image:`, `images:`, `picture:`, or `pictures:` to a relative path in front matter. JPG, PNG, WebP, AVIF, and GIF are supported.
+The app supports Cooklang recipes with YAML front matter, sections, notes, ingredients, cookware, and timers. Photos are optional: put an image beside a recipe with the same base name, or set `photo:`, `image:`, `images:`, `picture:`, or `pictures:` to a relative path in front matter. JPG, PNG, WebP, AVIF, and GIF are supported. Recipe files are limited to 5 MiB and photo files to 25 MiB; image decoding is limited to 40 megapixels to reduce resource-exhaustion risk.
+
+Recipe links omit the supported `.cook`, `.txt`, and `.cook.txt` filename suffixes. If two files map to the same extensionless URL, the first one in the sorted recipe inventory is shown.
 
 On a recipe page, use the serving controls to scale ingredient quantities. Press `/` to focus search, or `Escape` to clear it.
